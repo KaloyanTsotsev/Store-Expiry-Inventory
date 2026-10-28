@@ -1,0 +1,18 @@
+{
+  "document.jpg": {
+    "bytes": 1721406,
+    "sha256": "552a3bff483aad37a3621151f3af5c36d06e50ae5959cd4f4186f140b69777e6"
+  },
+  "ocr-layout.tsv": {
+    "bytes": 30319,
+    "sha256": "ad149568b4e5acc2a89761910b7cce9ae28e04b28060537283d73e0768ae489b"
+  },
+  "ocr-psm3.txt": {
+    "bytes": 3536,
+    "sha256": "09613af91d5544857b9405d4b97ed46677f181a8e23afaacb996ada5885ad105"
+  },
+  "ocr-test.txt": {
+    "bytes": 1859,
+    "sha256": "afe88e1f80b114c1ee58a94aac85fb7561bc7ba5ec5062d0782f942280f0cb0e"
+  }
+}

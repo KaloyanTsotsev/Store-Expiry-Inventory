@@ -1,0 +1,355 @@
+[
+  {
+    "id": "pbc_2964849126",
+    "name": "employees",
+    "type": "auth",
+    "listRule": "@request.auth.id != \"\"",
+    "viewRule": "@request.auth.id != \"\"",
+    "createRule": null,
+    "updateRule": null,
+    "deleteRule": null,
+    "passwordAuth": {
+      "enabled": true,
+      "identityFields": [
+        "email",
+        "username"
+      ]
+    },
+    "fields": [
+      {
+        "type": "text",
+        "name": "username",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "text",
+        "name": "name",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "select",
+        "name": "role",
+        "values": [
+          "employee",
+          "manager",
+          "admin"
+        ],
+        "maxSelect": 1
+      },
+      {
+        "type": "autodate",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false
+      },
+      {
+        "type": "autodate",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true
+      }
+    ],
+    "indexes": [
+      "CREATE UNIQUE INDEX idx_employee_username ON employees(username) WHERE username != ''"
+    ]
+  },
+  {
+    "id": "pbc_4092854851",
+    "name": "products",
+    "type": "base",
+    "listRule": "@request.auth.id != \"\"",
+    "viewRule": "@request.auth.id != \"\"",
+    "createRule": "@request.auth.id != \"\"",
+    "updateRule": "@request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "deleteRule": "@request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "fields": [
+      {
+        "type": "text",
+        "name": "name",
+        "required": true,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "text",
+        "name": "barcode",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "text",
+        "name": "category",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "file",
+        "name": "image",
+        "maxSelect": 1,
+        "maxSize": 0,
+        "mimeTypes": [],
+        "thumbs": [],
+        "protected": false,
+        "required": false
+      },
+      {
+        "type": "bool",
+        "name": "active"
+      },
+      {
+        "type": "autodate",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false
+      },
+      {
+        "type": "autodate",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "id": "pbc_2444735992",
+    "name": "deliveries",
+    "type": "base",
+    "listRule": "@request.auth.id != \"\"",
+    "viewRule": "@request.auth.id != \"\"",
+    "createRule": "@request.auth.id != \"\" && @request.body.received_by = @request.auth.id",
+    "updateRule": "received_by = @request.auth.id || @request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "deleteRule": "@request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "fields": [
+      {
+        "type": "text",
+        "name": "supplier",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "text",
+        "name": "document_number",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "date",
+        "name": "received_at",
+        "min": "",
+        "max": "",
+        "required": false
+      },
+      {
+        "type": "relation",
+        "name": "received_by",
+        "collectionId": "pbc_2964849126",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "required": false,
+        "cascadeDelete": false
+      },
+      {
+        "type": "file",
+        "name": "document_photo",
+        "maxSelect": 1,
+        "maxSize": 0,
+        "mimeTypes": [],
+        "thumbs": [],
+        "protected": false,
+        "required": false
+      },
+      {
+        "type": "text",
+        "name": "notes",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "autodate",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false
+      },
+      {
+        "type": "autodate",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "id": "pbc_1631394489",
+    "name": "batches",
+    "type": "base",
+    "listRule": "@request.auth.id != \"\"",
+    "viewRule": "@request.auth.id != \"\"",
+    "createRule": "@request.auth.id != \"\" && @request.body.created_by = @request.auth.id",
+    "updateRule": "created_by = @request.auth.id || @request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "deleteRule": "@request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "fields": [
+      {
+        "type": "relation",
+        "name": "product",
+        "collectionId": "pbc_4092854851",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "required": false,
+        "cascadeDelete": false
+      },
+      {
+        "type": "relation",
+        "name": "delivery",
+        "collectionId": "pbc_2444735992",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "required": false,
+        "cascadeDelete": false
+      },
+      {
+        "type": "text",
+        "name": "lot_number",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "number",
+        "name": "quantity",
+        "min": null,
+        "max": null,
+        "onlyInt": false,
+        "required": false
+      },
+      {
+        "type": "date",
+        "name": "expiry_date",
+        "min": "",
+        "max": "",
+        "required": false
+      },
+      {
+        "type": "relation",
+        "name": "created_by",
+        "collectionId": "pbc_2964849126",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "required": false,
+        "cascadeDelete": false
+      },
+      {
+        "type": "file",
+        "name": "photo",
+        "maxSelect": 1,
+        "maxSize": 0,
+        "mimeTypes": [],
+        "thumbs": [],
+        "protected": false,
+        "required": false
+      },
+      {
+        "type": "autodate",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false
+      },
+      {
+        "type": "autodate",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "id": "pbc_3471998555",
+    "name": "stock_movements",
+    "type": "base",
+    "listRule": "@request.auth.id != \"\"",
+    "viewRule": "@request.auth.id != \"\"",
+    "createRule": "@request.auth.id != \"\" && @request.body.employee = @request.auth.id",
+    "updateRule": "@request.auth.role = \"manager\" || @request.auth.role = \"admin\"",
+    "deleteRule": "@request.auth.role = \"admin\"",
+    "fields": [
+      {
+        "type": "relation",
+        "name": "batch",
+        "collectionId": "pbc_1631394489",
+        "maxSelect": 1,
+        "minSelect": 0,
+        "required": false,
+        "cascadeDelete": false
+      },
+      {
+        "type": "select",
+        "name": "type",
+        "values": [
+          "received",
+          "sold",
+          "waste",
+          "adjustment"
+        ],
+        "maxSelect": 1
+      },
+      {
+        "type": "number",
+        "name": "quantity",
+        "min": null,
+        "max": null,
+        "onlyInt": false,
+        "required": false
+      },
+      {
+        "type": "relation",
+        "name": "employee",
+        "collectionId": "pbc_2964849126",
+        "maxSelect": 0,
+        "minSelect": 0,
+        "required": false,
+        "cascadeDelete": false
+      },
+      {
+        "type": "text",
+        "name": "notes",
+        "required": false,
+        "max": 0,
+        "min": 0,
+        "pattern": ""
+      },
+      {
+        "type": "autodate",
+        "name": "created",
+        "onCreate": true,
+        "onUpdate": false
+      },
+      {
+        "type": "autodate",
+        "name": "updated",
+        "onCreate": true,
+        "onUpdate": true
+      }
+    ],
+    "indexes": []
+  }
+]

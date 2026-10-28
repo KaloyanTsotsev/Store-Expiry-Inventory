@@ -1,0 +1,10 @@
+{
+  "http-test-v2.json": {
+    "bytes": 30026,
+    "sha256": "ee1f99f27d1cb6d2dea8cf9ee680a5fa0ae3879f23bed8867f51284045a65f2f"
+  },
+  "ocr_api.py": {
+    "bytes": 2408,
+    "sha256": "e35860584d9f4b6e79e0d5b1b80463fdf5db2fa3d9da945cadff28f099091fb0"
+  }
+}

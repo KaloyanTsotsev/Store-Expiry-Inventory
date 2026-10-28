@@ -1,26 +1,44 @@
 # Store Expiry & Inventory
 
-Flutter приложение за документи на доставки и контрол на срокове.
+A mobile inventory and expiration date management application designed for small grocery stores.
 
-V2, етап 1: локален Android OCR (bul+eng), проверка на позиции, private локални
-чернови и запазваща се Light/Dark/System тема. Съществуващите Login/Products/
-Create Product/Logout са запазени. Не се финализират активни партиди от OCR.
+The goal is to make it easier to track products, deliveries, batches, stock levels, and expiration dates through a simple and practical interface.
 
-- [OCR резултати, файлове и тестове](docs/ocr-v2-stage1.md)
-- [Backend проект за одобрение](docs/backend-v2-proposal.md)
-- [Диагностика на предишния проблем с API Rules](docs/pocketbase-diagnosis.md)
-- [OCR лицензи и модели](THIRD_PARTY_NOTICES.md)
+## Tech Stack
 
-## Getting Started
+- **Flutter & Dart** — Mobile application
+- **PocketBase** — Backend, database, and authentication
+- **SQLite** — Data storage
+- **Linux** — Self-hosted local server
 
-This project is a starting point for a Flutter application.
+## Planned Features
 
-A few resources to get you started if this is your first Flutter project:
+- Product and barcode management
+- Delivery and batch tracking
+- Expiration date monitoring
+- Inventory and stock movements
+- Waste tracking
+- Employee authentication and roles
+- Future support for notifications and OCR
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+## Development Status
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+🚧 Work in progress — early development stage.
+
+This project is being developed for real-world use in a small grocery store, not just as a demo.
+
+## AI-Assisted Development
+
+**This is a vibe-coded, AI-assisted project.**
+
+I'm not a professional software developer, and I don't claim to have written all the code myself.
+
+The idea, requirements, architecture decisions, testing, and overall direction come from me, while AI tools help me write, understand, debug, and improve the code.
+
+I'm using this project to learn, experiment, and build something genuinely useful.
+
+**Built with curiosity, AI, and a lot of trial and error.**
+
+## Disclaimer
+
+This project is under active development and is not yet production-ready.

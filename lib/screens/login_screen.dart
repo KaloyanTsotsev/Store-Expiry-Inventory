@@ -17,6 +17,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final passwordController = TextEditingController();
 
   bool isLoading = false;
+  bool obscurePassword = true;
   String? errorMessage;
 
   Future<void> login() async {
@@ -108,11 +109,29 @@ class _LoginScreenState extends State<LoginScreen> {
                   TextField(
                     controller: passwordController,
                     enabled: !isLoading,
-                    obscureText: true,
+                    obscureText: obscurePassword,
                     onSubmitted: (_) => login(),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: 'Парола',
-                      prefixIcon: Icon(Icons.lock_outline),
+                      prefixIcon: const Icon(Icons.lock_outline),
+                      suffixIcon: IconButton(
+                        tooltip: obscurePassword
+                            ? 'Покажи паролата'
+                            : 'Скрий паролата',
+                        onPressed: isLoading
+                            ? null
+                            : () => setState(() {
+                                obscurePassword = !obscurePassword;
+                              }),
+                        icon: Icon(
+                          obscurePassword
+                              ? Icons.visibility
+                              : Icons.visibility_off,
+                          semanticLabel: obscurePassword
+                              ? 'Покажи паролата'
+                              : 'Скрий паролата',
+                        ),
+                      ),
                     ),
                   ),
                   if (errorMessage != null) ...[

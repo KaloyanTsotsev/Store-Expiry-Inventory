@@ -14,11 +14,18 @@ void main() {
       expect(gradle, contains('"com.expiry_tracker.expiry_tracker"'));
       expect(
         gradle,
-        contains('signingConfig = signingConfigs.getByName("debug")'),
+        contains(
+          'signingConfig = signingConfigs.getByName("storeflowRelease")',
+        ),
+      );
+      expect(gradle, contains('StoreFlow-Signing/key.properties'));
+      expect(
+        gradle,
+        isNot(contains('signingConfig = signingConfigs.getByName("debug")')),
       );
       final ios = File('ios/Runner/Info.plist').readAsStringSync();
       expect(
-        ios.replaceAll('\r\n','\n'),
+        ios.replaceAll('\r\n', '\n'),
         contains(
           '<key>CFBundleDisplayName</key>\n\t<string>StoreFlow</string>',
         ),

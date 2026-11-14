@@ -1,0 +1,23 @@
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:108: .send<Map<String, dynamic>>('/api/store/capabilities')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:200: '/api/store/drafts/stage',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:216: '/api/store/deliveries/${Uri.encodeComponent(draft.serverId!)}';
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:280: ? '/api/store/deliveries/${Uri.encodeComponent(serverId)}/finalize-by-code'
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:282: ? '/api/store/catalog/deliveries/${Uri.encodeComponent(serverId)}/finalize-article'
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:284: ? '/api/store/catalog/deliveries/${Uri.encodeComponent(serverId)}/finalize'
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\delivery_finalization_service.dart:285: : '/api/store/deliveries/${Uri.encodeComponent(serverId)}/finalize',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\ocr_pipeline.dart:29: '/api/store/ocr/recognize',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:17: await pb.collection('employees').authWithPassword(username, password);
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:31: final records = await pb.collection('products').getFullList(sort: 'name');
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:46: .collection('products')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:60: .send<Map<String, dynamic>>('/api/store/capabilities')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:79: '/api/store/drafts/discard',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:104: '/api/store/batches/${Uri.encodeComponent(id)}/handle',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:120: .collection('batches')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\pocketbase_service.dart:141: .collection('products')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:34: .send<Map<String, dynamic>>('/api/store/catalog/capabilities')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:92: '/api/store/catalog/products/delete',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:98: .collection('product_catalog_audit')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:109: '/api/store/catalog/capabilities',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:121: proposal ? '/api/store/catalog/corrections' : '/api/store/catalog/products',
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:128: .collection('product_corrections')
+C:\Users\cocev\AndroidStudioProjects\expiry_tracker\lib\services\product_catalog_service.dart:143: '/api/store/catalog/confirm-match',

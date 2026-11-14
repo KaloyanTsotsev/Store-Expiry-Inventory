@@ -62,12 +62,8 @@ class PaddleDocumentAdapter {
           ? quantity.toString()
           : '';
       final iso = text(row['expiry_date']);
-      var expiry = '';
-      if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(iso)) {
-        final parts = iso.split('-');
-        final candidate = '${parts[2]}.${parts[1]}.${parts[0]}';
-        if (parseDocumentDate(candidate) != null) expiry = candidate;
-      }
+      final parsedDate = parseDocumentDate(iso);
+      final expiry = parsedDate == null ? '' : formatDocumentDate(parsedDate);
       final name = text(row['name']),
           code = text(row['article_code']),
           unit = text(row['unit_raw']);
@@ -97,8 +93,8 @@ class PaddleDocumentAdapter {
             'paddle_product': jsonEncode(row),
           },
           uncertainFields: [
-            if (name.isEmpty) 'name',
-            if (code.isEmpty) 'supplierCode',
+            if (!validNewArticleName(name)) 'name',
+            if (!validArticleCode(code)) 'supplierCode',
             if (ordered.isEmpty) 'ordered',
             if (expiry.isEmpty) 'expiry',
           ],

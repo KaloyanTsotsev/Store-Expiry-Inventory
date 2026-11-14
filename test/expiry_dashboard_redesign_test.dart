@@ -248,7 +248,7 @@ void main() {
                         children: [
                           TextButton(
                             onPressed: () {},
-                            child: const Text('Няма останали'),
+                            child: const Text('Премахни от списъка'),
                           ),
                         ],
                       ),
@@ -295,7 +295,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await show(tester, find.text('Няма останали'));
+        await show(tester, find.text('Премахни от списъка'));
         expect(tester.takeException(), isNull);
       }
     },

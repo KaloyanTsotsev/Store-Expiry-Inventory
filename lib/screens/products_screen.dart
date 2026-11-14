@@ -106,16 +106,7 @@ class _ProductsScreenState extends State<ProductsScreen> {
       final name = product.data['name']?.toString().toLowerCase() ?? '';
       final barcode = product.data['barcode']?.toString().toLowerCase() ?? '';
 
-      final aliases = (product.data['aliases'] as List? ?? [])
-          .join(' ')
-          .toLowerCase();
-      final codes = (product.data['supplier_identifiers'] as List? ?? [])
-          .join(' ')
-          .toLowerCase();
-      return name.contains(query) ||
-          barcode.contains(query) ||
-          aliases.contains(query) ||
-          codes.contains(query);
+      return name.contains(query) || barcode.contains(query);
     }).toList();
 
     return Scaffold(
@@ -220,8 +211,6 @@ class _ProductsScreenState extends State<ProductsScreen> {
                         final category =
                             product.data['category']?.toString() ?? '';
 
-                        final active = product.data['active'] == true;
-
                         return Card(
                           margin: const EdgeInsets.symmetric(
                             horizontal: 16,
@@ -240,7 +229,6 @@ class _ProductsScreenState extends State<ProductsScreen> {
                               [
                                 if (barcode.isNotEmpty) 'Баркод: $barcode',
                                 if (category.isNotEmpty) category,
-                                if (!active) 'Неактивен',
                               ].join('\n'),
                             ),
                           ),

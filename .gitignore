@@ -51,3 +51,5 @@ app.*.map.json
 tool/ocr_benchmark/node_modules/
 tool/ocr_benchmark/models/
 tool/ocr_benchmark/*.traineddata
+
+# Markdown dispatcher credentials and its separate local delivery ledger.

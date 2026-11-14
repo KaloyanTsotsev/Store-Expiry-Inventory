@@ -6,16 +6,48 @@ String newDraftId() =>
     '${Random.secure().nextInt(0x7fffffff).toRadixString(36)}';
 
 DateTime? parseDocumentDate(String value) {
-  final match = RegExp(r'^(\d{2})\.(\d{2})\.(\d{4})$').firstMatch(value.trim());
-  if (match == null) return null;
-  final day = int.parse(match[1]!);
-  final month = int.parse(match[2]!);
-  final year = int.parse(match[3]!);
+  final input = value.trim();
+  final iso = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(input);
+  final local = RegExp(r'^(\d{1,2})([./-])(\d{1,2})\2(\d{4}|\d{2})$')
+      .firstMatch(input);
+  final compact = RegExp(r'^(\d{2})(\d{2})(\d{4})$').firstMatch(input);
+  if (iso == null && local == null && compact == null) return null;
+  final day = int.parse(iso?[3] ?? local?[1] ?? compact![1]!);
+  final month = int.parse(iso?[2] ?? local?[3] ?? compact![2]!);
+  final yearText = iso?[1] ?? local?[4] ?? compact![3]!;
+  final year = int.parse(yearText) + (yearText.length == 2 ? 2000 : 0);
   if (year < 2000 || year > 2100) return null;
   final date = DateTime(year, month, day);
   return date.day == day && date.month == month && date.year == year
       ? date
       : null;
+}
+
+String formatDocumentDate(DateTime date) =>
+    '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}';
+
+bool validArticleCode(String code) =>
+    RegExp(r'^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$').hasMatch(code.trim());
+
+bool validNewArticleName(String value) {
+  final name = value.trim();
+  final mixedWord = RegExp(r'[A-Za-zА-Яа-яЍѝ]+').allMatches(name).any((match) {
+    final token = match[0]!;
+    return RegExp(r'[A-Za-z]').hasMatch(token) &&
+        RegExp(r'[А-Яа-яЍѝ]').hasMatch(token);
+  });
+  return !mixedWord &&
+      name.length <= 1000 &&
+      RegExp(r'[A-Za-zА-Яа-яЍѝ].*[A-Za-zА-Яа-яЍѝ]').hasMatch(name) &&
+      !RegExp(r'[\x00-\x1f\x7f�…?]|\.\.').hasMatch(name) &&
+      !const {
+        'null',
+        'undefined',
+        'unknown',
+        'без име',
+        'неизвестен',
+        'n/a',
+      }.contains(name.toLowerCase());
 }
 
 double? parseQuantity(String text) {
@@ -76,7 +108,7 @@ class DraftItem {
   String? productId;
   bool checked;
   bool proposedNewProduct;
-  bool catalogOnFinalize;
+  bool catalogOnFinalize, articleBarcode;
   String barcode, matchReason;
   bool productSelectionConfirmed;
   bool requiresCatalogIdentity;
@@ -85,6 +117,7 @@ class DraftItem {
   final List<String> _uncertainFields;
   List<String> get uncertainFields => _uncertainFields
       .where((field) => field != 'lot' || lot != 'N/A')
+      .where((field) => field != 'name' || !articleBarcode || productId == null)
       .toList(growable: false);
   DraftItem({
     String? id,
@@ -101,6 +134,7 @@ class DraftItem {
     this.checked = false,
     this.proposedNewProduct = false,
     this.catalogOnFinalize = false,
+    this.articleBarcode = false,
     this.barcode = '',
     this.matchReason = '',
     this.productSelectionConfirmed = false,
@@ -115,6 +149,38 @@ class DraftItem {
 
   List<String> get validationErrors {
     final errors = <String>[];
+    if (articleBarcode) {
+      final count = parseQuantity(received);
+      if (count == 0) {
+        if (name.trim().length > 1000 ||
+            supplierCode.trim().length > 128 ||
+            lot.length > 128) {
+          errors.add('Прекалено дълги данни в неполучената позиция.');
+        }
+        return errors; // Not received: retain evidence, create no inventory.
+      }
+      if (name.trim().isEmpty || name.trim().length > 1000) {
+        errors.add('Въведете име на продукта до 1000 знака.');
+      }
+      if (supplierCode.trim().isEmpty || supplierCode.trim().length > 128) {
+        errors.add('Въведете артикулен код до 128 знака.');
+      }
+      if (count == null || count <= 0) {
+        errors.add('Въведете положително получено количество.');
+      }
+      if (parseDocumentDate(expiry) == null) {
+        errors.add('Въведете валиден срок на годност.');
+      }
+      if (productId == null &&
+          !proposedNewProduct &&
+          supplierCode.trim().isNotEmpty) {
+        errors.add(
+          matchReason.isEmpty ? 'Проверете артикулния код.' : matchReason,
+        );
+      }
+      if (lot.length > 128) errors.add('Партидата е твърде дълга.');
+      return errors;
+    }
     if (catalogOnFinalize && catalogRequest != null) {
       errors.add(
         'Има непотвърдена отделна каталожна заявка. Обновете каталога и проверете резултата преди групово приключване.',
@@ -157,10 +223,12 @@ class DraftItem {
     'expiry',
     'lot',
   };
-  bool get unclear =>
-      !checked &&
-      (uncertainFields.any(visibleFields.contains) ||
-          validationErrors.isNotEmpty);
+  bool get ready => validationErrors.isEmpty;
+  bool get unclear => articleBarcode
+      ? !ready
+      : !checked &&
+            (uncertainFields.any(visibleFields.contains) ||
+                validationErrors.isNotEmpty);
 
   /// All inline edits invalidate the physical confirmation, including edits back
   /// to the original value. A prefilling quantity never confirms an item.
@@ -214,6 +282,7 @@ class DraftItem {
     checked: j['checked'] == true,
     proposedNewProduct: j['proposedNewProduct'] == true,
     catalogOnFinalize: j['catalogOnFinalize'] == true,
+    articleBarcode: j['articleBarcode'] == true,
     barcode: j['barcode'] as String? ?? '',
     matchReason: j['matchReason'] as String? ?? '',
     productSelectionConfirmed: j['productSelectionConfirmed'] == true,
@@ -241,6 +310,7 @@ class DraftItem {
     'checked': checked,
     'proposedNewProduct': proposedNewProduct,
     'catalogOnFinalize': catalogOnFinalize,
+    'articleBarcode': articleBarcode,
     'barcode': barcode,
     'matchReason': matchReason,
     'productSelectionConfirmed': productSelectionConfirmed,
@@ -381,6 +451,11 @@ class DeliveryDraft {
        pages = pages ?? [],
        updatedAt = updatedAt ?? DateTime.now();
   Iterable<DraftItem> get items => pages.expand((p) => p.items);
+  int get readyCount => items.where((i) => i.ready).length;
+  bool get allReady =>
+      items.isNotEmpty &&
+      items.every((i) => i.ready) &&
+      pages.every((p) => p.recognized && p.error == null);
   bool get allReviewed =>
       items.isNotEmpty &&
       items.every((i) => i.checked && i.validationErrors.isEmpty) &&

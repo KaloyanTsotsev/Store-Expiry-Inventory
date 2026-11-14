@@ -16,28 +16,29 @@ function create(app) {
     return JSON.parse(JSON.stringify(result));
   }
   const required = {
-    deliveries:['status','revision','received_by','ocr_draft','finalized_by','finalized_at'],
+    deliveries:['status','revision','received_by','client_id','supplier','document_number','document_date','ocr_draft','finalized_by','finalized_at'],
     delivery_items:['delivery','client_id','page_id','document_row','name_snapshot','supplier_code','product',
       'proposed_new_product','requested_quantity','received_quantity','received_confirmed','expiry_date','lot_number','review_status','checked_by','checked_at'],
     batches:['product','delivery','source_item','quantity','expiry_date','lot_number','created_by','status','revision'],
     stock_movements:['batch','type','quantity','employee','operation','line_key'],
     inventory_operations:['employee','key','kind','target','payload_hash','response'],
     delivery_pages:['delivery','client_id','photo','image_hash','uploaded_hash','raw_ocr'],
-    products:['name','barcode','category','active'],
+    products:['name','barcode','category'],
   };
   return {
     requireSchemaAndRules() {
       for(const name of Object.keys(required)) {
         const collection = app.findCollectionByNameOrId(name);
         if(required[name].some(field => !collection.fields.getByName(field))) {
-          const error = new Error('backend_v2_required');error.status=503;throw error;
+          const error = new Error('backend_v2_required:'+name+':missing='+required[name].filter(field=>!collection.fields.getByName(field)).join(','));error.status=503;throw error;
         }
         if(name!=='products' && [collection.createRule,collection.updateRule,collection.deleteRule].some(rule => rule!==null)) {
-          const error = new Error('protected_inventory_rules_required');error.status=503;throw error;
+          const error = new Error('protected_inventory_rules_required:'+name);error.status=503;throw error;
         }
       }
       // Exact unique index definitions are part of the reviewed schema contract.
       const indexes = {
+        deliveries:"CREATE UNIQUE INDEX idx_deliveries_client ON deliveries(received_by, client_id) WHERE client_id != ''",
         delivery_items:"CREATE UNIQUE INDEX idx_items_client ON delivery_items(delivery, client_id)",
         batches:"CREATE UNIQUE INDEX idx_batch_source ON batches(source_item) WHERE source_item != ''",
         stock_movements:"CREATE UNIQUE INDEX idx_movement_line ON stock_movements(line_key) WHERE line_key != ''",
@@ -47,7 +48,14 @@ function create(app) {
       for(const name of Object.keys(indexes)) {
         const ddl=Array.from(app.findCollectionByNameOrId(name).indexes);
         if(!ddl.some(value=>normalizedDDL(value)===normalizedDDL(indexes[name]))) {
-          const error=new Error('unique_inventory_indexes_required');error.status=503;throw error;
+          const error=new Error('unique_inventory_indexes_required:'+name);error.status=503;throw error;
+        }
+        const indexName=/CREATE UNIQUE INDEX (\w+)/i.exec(indexes[name])[1];
+        const actual=new DynamicModel({sql:''});
+        try {app.db().newQuery("SELECT sql FROM sqlite_master WHERE type='index' AND name={:name}").bind({name:indexName}).one(actual);}
+        catch(_) {const error=new Error('missing_sqlite_index:'+name+':'+indexName);error.status=503;throw error;}
+        if(normalizedDDL(actual.sql)!==normalizedDDL(indexes[name])) {
+          const error=new Error('invalid_sqlite_index:'+name+':'+indexName);error.status=503;throw error;
         }
       }
     },
@@ -88,9 +96,30 @@ function create(app) {
     createOperation(employee,key,target,hash) {
       return insert('inventory_operations',{employee:employee,key:key,target:target,kind:'finalize',payload_hash:hash});
     },
-    products() {return app.findAllRecords('products').map(p=>({id:p.id,name:p.getString('name'),active:p.getBool('active')}));},
-    createProduct(name) {const p=insert('products',{name:name,barcode:'',category:'',active:true});return {id:p.id,name:name,active:true};},
-    resolveItem(id,product,lot) {const item=record('delivery_items',id);item.set('product',product);item.set('lot_number',lot);app.save(item);},
+    products() {
+      return app.findAllRecords('products').map(p=>({
+        id:p.id,name:p.getString('name'),barcode:p.getString('barcode'),
+      }));
+    },
+    createProduct(name,barcode='') {
+      const values={name,barcode,category:''};
+      const p=insert('products',values);
+      return {id:p.id,name,barcode};
+    },
+    assignProductCode(product,code) {
+      const p=record('products',product.id);
+      if(p.getString('barcode').trim())throw new Error('product_code_already_set');
+      p.set('barcode',code);
+      if(p.collection().fields.getByName('catalog_revision'))p.set('catalog_revision',p.getInt('catalog_revision')+1);
+      app.save(p);
+      return {id:p.id,name:p.getString('name'),barcode:code};
+    },
+    resolveItem(id,product,lot,name) {
+      const item=record('delivery_items',id);
+      item.set('product',product);item.set('lot_number',lot);
+      if(name) item.set('name_snapshot',name);
+      app.save(item);
+    },
     createBatch(delivery,item,product,line,actor) {
       return insert('batches',{delivery:delivery,source_item:item,product:product,quantity:line.received_quantity,
         expiry_date:line.expiry_date+' 00:00:00.000Z',lot_number:line.lot_number,created_by:actor,status:'active',revision:1}).id;

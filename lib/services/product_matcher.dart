@@ -17,8 +17,28 @@ class ProductMatch {
 }
 
 class ProductMatcher {
-  static bool validSupplierCode(String code) =>
-      RegExp(r'^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$').hasMatch(code.trim());
+  static bool validSupplierCode(String code) => validArticleCode(code);
+
+  static ProductMatch articleIdentity(
+    DraftItem item,
+    List<RecordModel> products,
+    String supplier,
+  ) {
+    final code = item.supplierCode.trim();
+    if (code.isEmpty) return const ProductMatch([], 'Въведете артикулния код.');
+    final matches = products
+        .where((p) => p.getStringValue('barcode').trim() == code)
+        .toList();
+    if (matches.isEmpty) return const ProductMatch([], 'Нов код');
+    if (matches.length != 1 || !active(matches.single)) {
+      return const ProductMatch(
+        [],
+        'Кодът е дублиран или продуктът е неактивен.',
+        conflict: true,
+      );
+    }
+    return ProductMatch(matches, 'Намерен по код', automatic: true);
+  }
 
   static ProductMatch supplierIdentity(
     DraftItem item,
@@ -77,7 +97,7 @@ class ProductMatcher {
           .replaceAll(RegExp(r'\s+'), ' ');
   static List<String> aliases(RecordModel p) =>
       (p.data['aliases'] as List? ?? []).whereType<String>().toList();
-  static bool active(RecordModel p) => p.data['active'] != false;
+  static bool active(RecordModel p) => p.id.isNotEmpty;
 
   static ProductMatch match(
     DraftItem item,
@@ -85,7 +105,9 @@ class ProductMatcher {
     String supplier,
   ) {
     if (item.requiresCatalogIdentity) {
-      return supplierIdentity(item, products, supplier);
+      return item.articleBarcode
+          ? articleIdentity(item, products, supplier)
+          : supplierIdentity(item, products, supplier);
     }
     final catalog = products.where(active).toList();
     final barcode = gtinKey(item.barcode);
@@ -260,14 +282,29 @@ class ProductMatcher {
     List<RecordModel> products,
     String supplier,
   ) {
+    if (item.articleBarcode) {
+      final result = articleIdentity(item, products, supplier);
+      final product = result.products.firstOrNull;
+      if (item.productId != product?.id) item.checked = false;
+      item.productId = product?.id;
+      item.productSelectionConfirmed = product != null;
+      item.proposedNewProduct = product == null && !result.conflict;
+      item.matchReason = result.reason;
+      if (product != null) item.name = product.getStringValue('name');
+      return;
+    }
     if (item.requiresCatalogIdentity) {
-      final result = supplierIdentity(item, products, supplier);
+      final result = match(item, products, supplier);
       final id = result.automatic ? result.products.single.id : null;
       if (item.productId != id) item.checked = false;
       item.productId = id;
       item.productSelectionConfirmed = result.automatic;
       item.proposedNewProduct =
-          !result.conflict && !result.automatic && item.name.trim().isNotEmpty;
+          !result.conflict &&
+          !result.automatic &&
+          (item.articleBarcode
+              ? validNewArticleName(item.name)
+              : item.name.trim().isNotEmpty);
       item.matchReason = result.reason;
       if (result.automatic) {
         item.name =

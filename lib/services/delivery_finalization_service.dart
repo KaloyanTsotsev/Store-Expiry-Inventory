@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -11,8 +12,7 @@ import 'pocketbase_service.dart';
 import 'package:flutter/foundation.dart';
 
 const backendV2Required =
-    'Реалното приключване изисква одобрен и внедрен backend V2. '
-    'Доставката остава чернова; продукти, партиди и движения не са записани.';
+    'Сървърът не потвърждава, че може да запише доставката. Черновата е запазена.';
 
 class DeliveryFinalization {
   static String differenceText(num received, num requested) {
@@ -27,9 +27,14 @@ class DeliveryFinalization {
   static List<String> errors(DeliveryDraft draft) => [
     if (draft.items.length > 500 || draft.pages.length > 50)
       'Една доставка може да съдържа до 500 позиции и 50 страници.',
-    if (!draft.allReviewed)
-      'Проверете всички позиции и сроковете на получените продукти.',
-    if (draft.items.any((i) => parseQuantity(i.ordered) == null))
+    if (draft.documentDate.trim().isNotEmpty &&
+        parseDocumentDate(draft.documentDate) == null)
+      'Въведете валидна дата на документа или оставете полето празно.',
+    if (!draft.allReady)
+      'Коригирайте невалидните позиции и разпознайте всички страници.',
+    if (draft.items.any(
+      (i) => !i.articleBarcode && parseQuantity(i.ordered) == null,
+    ))
       'Коригирайте заявените количества преди приключване.',
   ];
 
@@ -40,11 +45,14 @@ class DeliveryFinalization {
           'line_id': item.id,
           'source_row_id': item.sourceRowId,
           'page_id': page.id,
-          'name': item.name.trim(),
+          'name': item.name.trim().isEmpty && parseQuantity(item.received) == 0
+              ? 'Неполучен артикул'
+              : item.name.trim(),
           'supplier_code': item.supplierCode.trim(),
           'product_id': item.productId ?? '',
           'proposed_new': item.proposedNewProduct,
-          'requested_quantity': parseQuantity(item.ordered),
+          'requested_quantity':
+              parseQuantity(item.ordered) ?? (item.articleBarcode ? 0 : null),
           'received_quantity': parseQuantity(item.received),
           'expiry_date':
               parseDocumentDate(item.expiry)
@@ -84,27 +92,48 @@ abstract interface class DeliveryFinalizer {
 
 class PocketBaseDeliveryFinalizer implements DeliveryFinalizer {
   bool _available = false;
+  String? capabilityProblem;
   @override
   bool get available => _available;
 
   Future<void> probe() async {
     _available = false;
+    capabilityProblem = null;
     final pb = PocketBaseService.pb;
     if (!pb.authStore.isValid ||
         pb.authStore.record?.collectionName != 'employees') {
+      capabilityProblem = 'Влезте отново със служебния профил.';
       return;
     }
     try {
-      final info = await pb.send<Map<String, dynamic>>(
-        '/api/store/capabilities',
-      );
+      final info = await pb
+          .send<Map<String, dynamic>>('/api/store/capabilities')
+          .timeout(const Duration(seconds: 10));
       _available =
-          info['protocol'] == 2 &&
           info['atomic_finalization'] == true &&
           info['staging'] == true &&
           info['photos'] == true;
+      if (!_available) {
+        capabilityProblem = 'Сървърът не потвърди, че приема доставки.';
+      }
     } catch (e, stackTrace) {
       _available = false;
+      capabilityProblem = e is ClientException
+          ? switch (e.response['code']) {
+              'backend_v2_required' || 'backend_v2_schema_unavailable' =>
+                'Схемата на PocketBase за доставки е непълна.',
+              'protected_inventory_rules_required' =>
+                'Защитните правила за складови записи не са активни.',
+              'unique_inventory_indexes_required' =>
+                'Липсват защитните индекси за повторени заявки.',
+              _ => switch (e.statusCode) {
+                404 => 'На сървъра липсва маршрутът за доставки.',
+                503 => 'Записването на доставки не е достъпно на сървъра.',
+                401 || 403 => 'Няма разрешена служебна сесия.',
+                _ => 'Няма потвърдена връзка за финализиране.',
+              },
+            }
+          : 'Няма потвърдена връзка за финализиране.';
       debugPrint('V2 capabilities probe failed: $e');
       debugPrintStack(stackTrace: stackTrace);
     }
@@ -168,11 +197,13 @@ class PocketBaseDeliveryFinalizer implements DeliveryFinalizer {
       };
       await persist();
     }
-    final staged = await pb.send<Map<String, dynamic>>(
-      '/api/store/drafts/stage',
-      method: 'POST',
-      body: draft.stagingRequest!,
-    );
+    final staged = await pb
+        .send<Map<String, dynamic>>(
+          '/api/store/drafts/stage',
+          method: 'POST',
+          body: draft.stagingRequest!,
+        )
+        .timeout(const Duration(seconds: 45));
     if (staged['delivery_id'] is! String ||
         staged['revision'] is! int ||
         staged['status'] != 'draft') {
@@ -185,7 +216,9 @@ class PocketBaseDeliveryFinalizer implements DeliveryFinalizer {
     await persist();
     final path =
         '/api/store/deliveries/${Uri.encodeComponent(draft.serverId!)}';
-    final status = await pb.send<Map<String, dynamic>>('$path/status');
+    final status = await pb
+        .send<Map<String, dynamic>>('$path/status')
+        .timeout(const Duration(seconds: 45));
     if (status['status'] != 'draft' ||
         status['revision'] is! int ||
         status['pages'] is! List) {
@@ -211,15 +244,17 @@ class PocketBaseDeliveryFinalizer implements DeliveryFinalizer {
       if (actual != raw['image_hash']) {
         throw StateError('Снимката е променена след потвърждението.');
       }
-      final uploaded = await pb.send<Map<String, dynamic>>(
-        '$path/pages/${Uri.encodeComponent(page.id)}/photo',
-        method: 'POST',
-        body: {
-          'expected_revision': draft.serverRevision.toString(),
-          'image_hash': actual,
-        },
-        files: [await http.MultipartFile.fromPath('photo', page.imagePath)],
-      );
+      final uploaded = await pb
+          .send<Map<String, dynamic>>(
+            '$path/pages/${Uri.encodeComponent(page.id)}/photo',
+            method: 'POST',
+            body: {
+              'expected_revision': draft.serverRevision.toString(),
+              'image_hash': actual,
+            },
+            files: [await http.MultipartFile.fromPath('photo', page.imagePath)],
+          )
+          .timeout(const Duration(seconds: 60));
       if (uploaded['delivery_id'] != draft.serverId ||
           uploaded['uploaded_hash'] != actual ||
           uploaded['revision'] is! int) {
@@ -241,13 +276,19 @@ class PocketBaseDeliveryFinalizer implements DeliveryFinalizer {
         pb.authStore.record?.collectionName != 'employees') {
       throw StateError('Влезте отново със служебния профил.');
     }
-    final response = await pb.send<Map<String, dynamic>>(
-      request['catalog_confirmed'] == true
-          ? '/api/store/catalog/deliveries/${Uri.encodeComponent(serverId)}/finalize'
-          : '/api/store/deliveries/${Uri.encodeComponent(serverId)}/finalize',
-      method: 'POST',
-      body: request,
-    );
+    final response = await pb
+        .send<Map<String, dynamic>>(
+          request['finalize_by_code'] == true
+              ? '/api/store/deliveries/${Uri.encodeComponent(serverId)}/finalize-by-code'
+              : request['article_barcode_confirmed'] == true
+              ? '/api/store/catalog/deliveries/${Uri.encodeComponent(serverId)}/finalize-article'
+              : request['catalog_confirmed'] == true
+              ? '/api/store/catalog/deliveries/${Uri.encodeComponent(serverId)}/finalize'
+              : '/api/store/deliveries/${Uri.encodeComponent(serverId)}/finalize',
+          method: 'POST',
+          body: request,
+        )
+        .timeout(const Duration(seconds: 45));
     final revision = response['revision'];
     if (response['status'] != 'finalized' ||
         response['delivery_id'] != serverId ||
@@ -257,16 +298,59 @@ class PocketBaseDeliveryFinalizer implements DeliveryFinalizer {
         'Сървърът не потвърди приключването. Черновата е запазена.',
       );
     }
+    // A status-only response is insufficient: require a receipt for every row.
+    final rows = response['lines'];
+    final expected = request['lines'] as List;
+    if (rows is! List ||
+        rows.length != expected.length ||
+        rows.whereType<Map>().map((r) => r['line_id']).toSet().length !=
+            rows.length) {
+      throw const FormatException(
+        'Липсва пълно потвърждение за записаните позиции.',
+      );
+    }
+    for (final line in expected) {
+      final saved = rows
+          .whereType<Map>()
+          .where((r) => r['line_id'] == line['line_id'])
+          .firstOrNull;
+      if (saved == null ||
+          (line['received_quantity'] as num) > 0 &&
+              ['product_id', 'batch_id', 'movement_id'].any(
+                (key) =>
+                    saved[key] is! String || (saved[key] as String).isEmpty,
+              )) {
+        throw const FormatException(
+          'Сървърът не потвърди продукт, партида и движение за всяка позиция.',
+        );
+      }
+    }
     return response;
   }
 }
 
 String finalizationError(Object error) {
+  if (error is TimeoutException) {
+    return 'Сървърът не отговори навреме. Резултатът е непотвърден; черновата е запазена. Повторете със същата заявка.';
+  }
   if (error is ClientException) {
+    final code = error.response['code'];
+    if (code == 'transaction_not_confirmed') {
+      return 'Записването не е потвърдено от сървъра. Черновата е запазена. Опитайте отново от този екран, без да създавате нова доставка.';
+    }
+    if (code == 'conflicting_article_barcode' ||
+        code == 'conflicting_supplier_identifier' ||
+        code == 'duplicate_product_name') {
+      return 'Има конфликт в каталога. Проверете артикула, баркода и свързания продукт. Доставката не е приключена.';
+    }
+    if (code == 'invalid_article_product_name' ||
+        code == 'invalid_supplier_code') {
+      return 'Името или кодът на артикула не са валидни. Доставката не е приключена.';
+    }
     if (error.statusCode == 404 ||
         error.statusCode == 501 ||
         error.statusCode == 503) {
-      return 'Endpoint-ът за приключване не е достъпен или backend V2 не е включен. '
+      return 'Маршрутът за записване на доставки не е достъпен. '
           'Запазената заявка остава за проверка; не създавайте повторна доставка.';
     }
     if (error.statusCode == 409) {

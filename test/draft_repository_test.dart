@@ -85,6 +85,57 @@ void main() {
       throwsStateError,
     );
   });
+  test(
+    'Staged local draft is removed only after server confirms its client ID',
+    () async {
+      final calls = <String>[];
+      var fail = true;
+      repository = DraftRepository(
+        rootDirectory: () async => root,
+        discardServer: (owner, id) async {
+          calls.add('$owner:$id');
+          if (fail) throw StateError('server rejected');
+        },
+      );
+      final draft = DeliveryDraft(
+        ownerId: 'employee1',
+        stagingRequest: {'operation_key': 'pending'},
+      );
+      await repository.save(draft);
+      await expectLater(
+        repository.deleteDraft(draft, employeeId: draft.ownerId),
+        throwsStateError,
+      );
+      expect((await repository.list(draft.ownerId)).single.id, draft.id);
+      fail = false;
+      await repository.deleteDraft(draft, employeeId: draft.ownerId);
+      expect(await repository.list(draft.ownerId), isEmpty);
+      expect(calls, ['employee1:${draft.id}', 'employee1:${draft.id}']);
+    },
+  );
+
+  test('Corrupt draft does not block listing and can be quarantined without deleting files', () async {
+    final broken = DeliveryDraft(ownerId: 'employee1');
+    final healthy = DeliveryDraft(ownerId: 'employee1');
+    await repository.save(broken);
+    await repository.save(healthy);
+    final folder = Directory('${root.path}/delivery_drafts/employee1');
+    await File('${folder.path}/${broken.id}/draft.json')
+        .writeAsString('{broken');
+    expect((await repository.list('employee1')).single.id, healthy.id);
+    expect(repository.damagedDraftIds, [broken.id]);
+    await repository.quarantineDamagedDraft('employee1', broken.id);
+    expect((await repository.list('employee1')).single.id, healthy.id);
+    expect(repository.damagedDraftIds, isEmpty);
+    final quarantine = (await folder.list().toList())
+        .whereType<Directory>()
+        .singleWhere((d) => d.path.contains('.quarantine_${broken.id}'));
+    expect(
+      await File('${quarantine.path}/draft.json').readAsString(),
+      '{broken',
+    );
+  });
+
   test('Page removal cleans only its owned photo and previous OCR snapshot', () async {
     final draft = DeliveryDraft(ownerId: 'employee1');
     final input = File('${root.path}/source.jpg');

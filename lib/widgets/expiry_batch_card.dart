@@ -227,6 +227,7 @@ class ExpiryBatchCard extends StatelessWidget {
                 height: 1.25,
               ),
             ),
+            if (batch.barcode.isNotEmpty) Text('Баркод: ${batch.barcode}'),
             const SizedBox(height: AppSpacing.small),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/delivery_draft.dart';
 import '../services/draft_repository.dart';
@@ -18,6 +19,7 @@ class DeliveriesScreen extends StatefulWidget {
 class _DeliveriesScreenState extends State<DeliveriesScreen> {
   final repository = DraftRepository();
   List<DeliveryDraft> drafts = [];
+  List<String> damaged = [];
   String? error;
   bool loading = true, opening = false;
   String get ownerId => PocketBaseService.pb.authStore.record!.id;
@@ -30,7 +32,12 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
 
   Future<void> _initialize() async {
     try {
-      final recovered = await repository.recoverPicker(ownerId, ImagePicker());
+      DeliveryDraft? recovered;
+      try {
+        recovered = await repository.recoverPicker(ownerId, ImagePicker());
+      } catch (e) {
+        PocketBaseService.logError('deliveries.recover_picker', e);
+      }
       await _load();
       if (!mounted) return;
       if (recovered != null) {
@@ -56,6 +63,7 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
       if (mounted) {
         setState(() {
           drafts = records;
+          damaged = repository.damagedDraftIds;
           error = null;
           loading = false;
         });
@@ -74,7 +82,18 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
     if (opening) return;
     setState(() => opening = true);
     try {
-      final draft = DeliveryDraft(ownerId: ownerId);
+      final owner = ownerId;
+      var supplier = '';
+      try {
+        supplier =
+            await SharedPreferencesAsync().getString(
+              'default_supplier_$owner',
+            ) ??
+            '';
+      } catch (e) {
+        PocketBaseService.logError('deliveries.default_supplier', e);
+      }
+      final draft = DeliveryDraft(ownerId: owner, supplier: supplier);
       await repository.save(draft);
       if (mounted) await _open(draft, camera: true);
     } catch (e) {
@@ -119,7 +138,7 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
       builder: (context) => AlertDialog(
         title: const Text('Изтрий чернова?'),
         content: Text(
-          'Ще се изтрият ${draft.pages.length} снимки/страници, OCR данните и всички проверки от този телефон.',
+          'Ще се изтрият ${draft.pages.length} снимки/страници, OCR данните и проверките. Ако черновата е подготвена на сървъра, първо ще се провери и изтрие само незавършеният запис.',
         ),
         actions: [
           TextButton(
@@ -140,6 +159,39 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
       await _load();
     } catch (e) {
       if (mounted) setState(() => error = 'Черновата не е изтрита: $e');
+    } finally {
+      if (mounted) setState(() => opening = false);
+    }
+  }
+
+  Future<void> _quarantine(String id) async {
+    if (opening) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Прибери повредената чернова?'),
+        content: const Text(
+          'Файловете ще се запазят отделно на телефона за възстановяване. Няма да се променя PocketBase.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отказ'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Прибери'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => opening = true);
+    try {
+      await repository.quarantineDamagedDraft(ownerId, id);
+      await _load();
+    } catch (e) {
+      if (mounted) setState(() => error = 'Черновата не е прибрана: $e');
     } finally {
       if (mounted) setState(() => opening = false);
     }
@@ -187,10 +239,21 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
             ),
             TextButton(onPressed: _load, child: const Text('Опитай отново')),
           ],
-          if (!loading && error == null && drafts.isEmpty)
+          if (!loading && error == null && drafts.isEmpty && damaged.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 24),
               child: Text('Нямате чернови. Започнете със снимка на документа.'),
+            ),
+          for (final id in damaged)
+            Card(
+              child: ListTile(
+                title: const Text('Повредена чернова'),
+                subtitle: Text(id),
+                trailing: TextButton(
+                  onPressed: opening ? null : () => _quarantine(id),
+                  child: const Text('Прибери безопасно'),
+                ),
+              ),
             ),
           for (final draft in drafts)
             Card(
@@ -211,8 +274,7 @@ class _DeliveriesScreenState extends State<DeliveriesScreen> {
                   onPressed:
                       opening ||
                           draft.status != 'draft' ||
-                          draft.finalizationRequest != null ||
-                          draft.stagingRequest != null
+                          draft.finalizationReceipt != null
                       ? null
                       : () => _delete(draft),
                   icon: const Icon(Icons.delete_outline),

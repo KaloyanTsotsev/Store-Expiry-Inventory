@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:pocketbase/pocketbase.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/delivery_draft.dart';
 import '../services/draft_repository.dart';
@@ -15,9 +16,6 @@ import '../services/page_capture_service.dart';
 import '../widgets/document_photo.dart';
 import '../widgets/bulk_review_row.dart';
 import '../services/product_matcher.dart';
-import '../services/product_catalog_service.dart';
-import '../services/delivery_catalog_service.dart';
-import '../services/delivery_row_status.dart';
 import '../services/delivery_finalization_service.dart';
 import 'delivery_item_screen.dart';
 
@@ -28,7 +26,6 @@ class DeliveryEditorScreen extends StatefulWidget {
   final OcrEngine? engine;
   final PageCapture? capture;
   final DeliveryFinalizer? finalizer;
-  final ProductCatalogService? catalog;
   final Future<List<RecordModel>> Function()? catalogLoader;
   const DeliveryEditorScreen({
     super.key,
@@ -38,7 +35,6 @@ class DeliveryEditorScreen extends StatefulWidget {
     this.engine,
     this.capture,
     this.finalizer,
-    this.catalog,
     this.catalogLoader,
   });
   @override
@@ -49,19 +45,23 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
   late final capture = widget.capture ?? PageCaptureService();
   final parser = PaddleDocumentAdapter();
   bool busy = false;
-  bool confirmingFinalization = false;
-  bool catalogLoaded = false, dirty = false;
+  bool confirmingSave = false;
+  bool dirty = false;
   String filter = 'all';
+  final rowsAnchor = GlobalKey();
+  final scroll = ScrollController();
   Timer? autosave;
+  late final supplierInput = TextEditingController(text: draft.supplier);
+  late final documentNumberInput = TextEditingController(
+    text: draft.documentNumber,
+  );
+  late final documentDateInput = TextEditingController(
+    text: draft.documentDate,
+  );
   int revision = 0;
   String? error;
   String status = 'Черновата е записана на телефона';
   List<RecordModel> products = [];
-  late final catalog = widget.catalog ?? ProductCatalogService();
-  CatalogAccess catalogAccess = const CatalogAccess(
-    available: false,
-    message: 'Проверява се Catalog V3…',
-  );
   String? catalogError;
   DeliveryDraft get draft => widget.draft;
   late final finalizer = widget.finalizer ?? PocketBaseDeliveryFinalizer();
@@ -89,12 +89,8 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
   }
 
   void _prepareIdentity(DraftItem item) {
-    final allowed =
-        catalogAccess.available && catalogAccess.canFinalizeDelivery;
-    if (item.catalogOnFinalize != allowed && item.productId == null) {
-      item.checked = false;
-    }
-    item.catalogOnFinalize = allowed;
+    if (!item.articleBarcode) item.checked = false;
+    item.articleBarcode = true;
     ProductMatcher.prepare(item, products, draft.supplier);
   }
 
@@ -105,9 +101,6 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
       return;
     }
     try {
-      final access = await catalog.probe();
-      if (!mounted) return;
-      setState(() => catalogAccess = access);
       final records =
           await (widget.catalogLoader?.call() ??
               PocketBaseService.getProducts());
@@ -118,7 +111,6 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
         setState(() {
           products = records;
           catalogError = null;
-          catalogLoaded = true;
           for (final item in draft.items) {
             _prepareIdentity(item);
           }
@@ -128,7 +120,12 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
     } catch (e) {
       PocketBaseService.logError('delivery.catalog', e);
       if (mounted) {
-        setState(() => catalogError = PocketBaseService.errorMessage(e));
+        setState(() {
+          catalogError = PocketBaseService.errorMessage(e);
+          for (final item in draft.items) {
+            if (!item.articleBarcode) _prepareIdentity(item);
+          }
+        });
       }
     }
   }
@@ -268,10 +265,8 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
           page.elapsedMs = ((data['processing_seconds'] as num? ?? 0) * 1000)
               .round();
           page.items = parsed.items;
-          if (catalogLoaded) {
-            for (final item in page.items) {
-              _prepareIdentity(item);
-            }
+          for (final item in page.items) {
+            _prepareIdentity(item);
           }
           page.layoutNote = parsed.note;
           page.recognized = true;
@@ -295,7 +290,6 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
           item: item,
           imagePath: page.imagePath,
           products: products,
-          catalogAccess: catalogAccess,
           supplier: draft.supplier,
           onReloadCatalog: () async {
             await _loadCatalog();
@@ -322,6 +316,7 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
           productSelectionConfirmed: item.productSelectionConfirmed,
           requiresCatalogIdentity: item.requiresCatalogIdentity,
           catalogOnFinalize: item.catalogOnFinalize,
+          articleBarcode: item.articleBarcode,
           ordered: item.ordered,
           proposedNewProduct: item.proposedNewProduct,
           productId: item.productId,
@@ -359,100 +354,64 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
       page.layoutNote = 'Ръчно въведени позиции. Оригиналната снимка и наличният OCR текст са запазени.';
     }
     final item = DraftItem(requiresCatalogIdentity: true);
-    page.items.add(item);
-    if (await _save() && mounted) await _editItem(page, item);
+    _prepareIdentity(item);
+    setState(() => page!.items.add(item));
+    await _save();
   }
 
-  Future<void> _metadata() async {
-    if (editingLocked) return;
-    final supplier = TextEditingController(text: draft.supplier);
-    final number = TextEditingController(text: draft.documentNumber);
-    final date = TextEditingController(text: draft.documentDate);
-    try {
-      final saved = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Данни за документа'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: supplier,
-                  decoration: const InputDecoration(labelText: 'Доставчик'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: number,
-                  decoration: const InputDecoration(
-                    labelText: 'Номер на документ',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: date,
-                  decoration: const InputDecoration(
-                    labelText: 'Дата на документа',
-                    hintText: 'ДД.ММ.ГГГГ',
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Отказ'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Запази'),
-            ),
-          ],
-        ),
-      );
-      if (saved == true) {
-        if (draft.supplier != supplier.text.trim()) {
-          if (draft.items.any((item) => item.catalogRequest != null)) {
-            if (mounted) {
-              setState(
-                () => error = 'Първо разрешете запазената каталожна заявка, преди да сменяте доставчика.',
-              );
-            }
-            return;
-          }
-          for (final item in draft.items) {
-            item.checked = false;
-            item.productId = null;
-            item.proposedNewProduct = false;
-            item.productSelectionConfirmed = false;
-          }
+  bool get _metadataEdited =>
+      supplierInput.text.trim() != draft.supplier ||
+      documentNumberInput.text.trim() != draft.documentNumber ||
+      documentDateInput.text.trim() != draft.documentDate;
+
+  bool _applyMetadata() {
+    final supplier = supplierInput.text.trim();
+    setState(() {
+      error = null;
+      draft.supplier = supplier;
+      draft.documentNumber = documentNumberInput.text.trim();
+      draft.documentDate = documentDateInput.text.trim();
+    });
+    return true;
+  }
+
+  Future<void> _saveMetadata({bool rememberSupplier = false}) async {
+    if (editingLocked || !_applyMetadata()) return;
+    final supplier = draft.supplier;
+    if (await _save() && rememberSupplier) {
+      try {
+        final prefs = SharedPreferencesAsync();
+        final key = 'default_supplier_${draft.ownerId}';
+        if (supplier.isEmpty) {
+          await prefs.remove(key);
+        } else {
+          await prefs.setString(key, supplier);
         }
-        draft.supplier = supplier.text.trim();
-        if (catalogLoaded) {
-          for (final item in draft.items) {
-            _prepareIdentity(item);
-          }
+        if (mounted) {
+          setState(
+            () => status = supplier.isEmpty
+                ? 'Доставчикът по подразбиране е изчистен.'
+                : 'Доставчикът е запомнен за нови доставки на този телефон.',
+          );
         }
-        draft.documentNumber = number.text.trim();
-        draft.documentDate = date.text.trim();
-        await _save();
+      } catch (e) {
+        if (mounted) setState(() => error = 'Доставчикът не е запомнен: $e');
       }
-    } finally {
-      supplier.dispose();
-      number.dispose();
-      date.dispose();
     }
   }
 
   @override
   void dispose() {
+    scroll.dispose();
+    supplierInput.dispose();
+    documentNumberInput.dispose();
+    documentDateInput.dispose();
     autosave?.cancel();
     super.dispose();
   }
 
   void _changed(DraftItem item) {
-    if (catalogLoaded) _prepareIdentity(item);
+    _prepareIdentity(item);
     revision++;
     setState(() {
       dirty = true;
@@ -482,10 +441,12 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
   }
 
   Future<void> _deleteDraft() async {
-    if (editingLocked ||
+    if (busy ||
+        draft.status != 'draft' ||
+        draft.finalizationReceipt != null ||
         !await _confirm(
           'Изтрий чернова?',
-          'Ще се изтрият всички снимки, OCR данни и проверки на тази незавършена доставка от телефона.',
+          'Ще се изтрият всички снимки, OCR данни и проверки на тази незавършена доставка. Ако е подготвена на сървъра, първо ще се провери и изтрие само незавършеният запис.',
         )) {
       return;
     }
@@ -512,112 +473,30 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
     }
   }
 
-  DeliveryRowStatus _rowStatus(DraftItem item) => DeliveryRowStatus.resolve(
-    item,
-    draft.supplier,
-    catalogLoaded,
-    catalogAccess,
-  );
-
-  Future<void> _addCatalog(DraftItem item) async {
-    if (editingLocked || !_rowStatus(item).canAdd) return;
-    setState(() => busy = true);
-    try {
-      final access = await catalog.probe();
-      if (!mounted) return;
-      setState(() => catalogAccess = access);
-      if (!access.available || !access.canCreate) {
-        throw StateError(access.message);
+  Future<void> _showCorrections() async {
+    setState(() => filter = 'unclear');
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || !scroll.hasClients) return;
+    scroll.jumpTo(0);
+    // ListView builds lazily: bring the correction section into the viewport
+    // even when a tall document preview precedes it.
+    for (var step = 0; mounted && scroll.hasClients && step < 100; step++) {
+      await WidgetsBinding.instance.endOfFrame;
+      final target = rowsAnchor.currentContext;
+      if (target != null && target.mounted) {
+        await Scrollable.ensureVisible(
+          target,
+          duration: const Duration(milliseconds: 150),
+        );
+        return;
       }
-      final approved = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Добави в каталога'),
-          content: Text(
-            '${item.name}\nДоставчик: ${draft.supplier}\nКод: ${item.supplierCode}\n\nПотвърждавам името и кода. Това не записва количества и не потвърждава физическата проверка.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Отказ'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Потвърди добавянето'),
-            ),
-          ],
-        ),
-      );
-      if (approved != true) return;
-      final record = await DeliveryCatalogService(catalog: catalog).confirm(
-        item: item,
-        supplier: draft.supplier,
-        products: products,
-        physicallyConfirmed: true,
-        catalogOnly: true,
-        persist: () async {
-          item.checked = false;
-          if (!await _save()) throw StateError('Черновата не е записана.');
-        },
-      );
-      products = [...products.where((p) => p.id != record.id), record];
-      for (final row in draft.items) {
-        _prepareIdentity(row);
-      }
-      await _save();
-    } catch (e) {
-      if (mounted) setState(() => error = ProductCatalogService.message(e));
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
-  Future<void> _markAll() async {
-    if (editingLocked) return;
-    var physicallyChecked = false;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: const Text('Маркирай всички като проверени'),
-          content: CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            value: physicallyChecked,
-            title: const Text(
-              'Физически проверих продуктите, количествата и сроковете на всички позиции. Партида N/A не изисква отделна проверка.',
-            ),
-            onChanged: (value) =>
-                update(() => physicallyChecked = value == true),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Отказ'),
-            ),
-            FilledButton(
-              onPressed: physicallyChecked
-                  ? () => Navigator.pop(context, true)
-                  : null,
-              child: const Text('Потвърди всички'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    setState(() {
-      for (final item in draft.items) {
-        item.checked = item.validationErrors.isEmpty;
-      }
-    });
-    await _save();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Проверени ${draft.checkedCount} от ${draft.items.length}. Невалидните позиции остават за корекция.',
-          ),
-        ),
+      final next = (scroll.offset + scroll.position.viewportDimension * .8)
+          .clamp(0.0, scroll.position.maxScrollExtent);
+      if (next == scroll.offset) return;
+      await scroll.animateTo(
+        next,
+        duration: const Duration(milliseconds: 60),
+        curve: Curves.linear,
       );
     }
   }
@@ -629,20 +508,73 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
       dirty = false;
     });
     await WidgetsBinding.instance.endOfFrame;
-    if (mounted) Navigator.pop(context, 'finalized');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Доставката е записана в PocketBase.')),
+      );
+      Navigator.pop(context, 'finalized');
+    }
   }
 
   Future<void> _finish() async {
-    if (busy) return;
+    if (busy || confirmingSave) return;
+    if (!editingLocked) {
+      for (final item in draft.items) {
+        if (!item.articleBarcode) _prepareIdentity(item);
+      }
+    }
+    if (!editingLocked && _metadataEdited && !_applyMetadata()) return;
     if (draft.finalizationReceipt == null &&
         draft.stagingRequest == null &&
         draft.finalizationRequest == null &&
         DeliveryFinalization.errors(draft).isNotEmpty) {
+      setState(() => error = DeliveryFinalization.errors(draft).join('\n'));
       return;
+    }
+    if (draft.finalizationReceipt == null &&
+        draft.finalizationRequest == null &&
+        draft.stagingRequest == null &&
+        draft.items.any((i) => parseQuantity(i.received) == 0)) {
+      final accepted = draft.items
+          .where((i) => (parseQuantity(i.received) ?? 0) > 0)
+          .toList();
+      final skipped = draft.items
+          .where((i) => parseQuantity(i.received) == 0)
+          .toList();
+      confirmingSave = true;
+      bool? confirmed;
+      try {
+        confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Запази доставката'),
+            content: SingleChildScrollView(
+              child: Text(
+                'Ще бъдат записани ${accepted.length} позиции.\n'
+                '${accepted.map((i) => '${i.name}: ${i.received} ${i.unit} • ${i.expiry}').join('\n')}\n\n'
+                'Пропуснати: ${skipped.length}\n${skipped.map((i) => i.name).join('\n')}\n\n'
+                'Потвърждавам физическата проверка на полученото.',
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Отказ'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Потвърди'),
+              ),
+            ],
+          ),
+        );
+      } finally {
+        confirmingSave = false;
+      }
+      if (confirmed != true || !mounted) return;
     }
     setState(() {
       busy = true;
-      confirmingFinalization = true;
       error = null;
     });
     autosave?.cancel();
@@ -651,71 +583,16 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
         if (await _save()) await _returnToDashboard();
         return;
       }
-      final lines =
-          (draft.finalizationRequest?['lines'] ??
-                  draft.stagingRequest?['lines'])
-              as List? ??
-          DeliveryFinalization.lines(draft);
-      final approved = await showDialog<bool>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text('Приключване на доставката'),
-          content: SizedBox(
-            width: 500,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Позиции: ${lines.length}'),
-                  const Text(
-                    'Разлика = получени − заявени. Количествата са показани по позиции.',
-                  ),
-                  const SizedBox(height: 12),
-                  for (final raw in lines) ...[
-                    Text(
-                      raw['name'] as String,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    Text(
-                      'Заявени: ${raw['requested_quantity']} • Получени: ${raw['received_quantity']}',
-                    ),
-                    Text(
-                      'Разлика: ${DeliveryFinalization.differenceText(raw['received_quantity'] as num, raw['requested_quantity'] as num)}',
-                    ),
-                    Text(
-                      'Годност: ${raw['expiry_date']} • Партида: ${raw['lot_number']}',
-                    ),
-                    const Divider(),
-                  ],
-                  if (!finalizer.available) const Text(backendV2Required),
-                  if (finalizer.available)
-                    const Text(
-                      'Потвърждавам имената и артикулните кодове на новите продукти, физически получените количества, сроковете и партидите. Новите продукти и асоциации се създават заедно с партидите и входящите движения.',
-                    ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Назад към проверката'),
-            ),
-            FilledButton(
-              onPressed: finalizer.available
-                  ? () => Navigator.pop(context, true)
-                  : null,
-              child: const Text('Потвърди и приключи'),
-            ),
-          ],
-        ),
-      );
-      if (mounted) setState(() => confirmingFinalization = false);
-      if (approved != true) {
-        await _save();
-        return;
+      // The final Save action confirms all valid rows; OCR never confirms them.
+      if (draft.stagingRequest == null && draft.finalizationRequest == null) {
+        for (final item in draft.items) {
+          item.checked = item.ready;
+        }
+      }
+      // Preserve the corrections even if capability probing or the network fails.
+      if (!await _save()) return;
+      if (!finalizer.available && widget.finalizer == null) {
+        await _probeBackend();
       }
       if (!finalizer.available) throw StateError(backendV2Required);
       await finalizer.prepare(draft, () async {
@@ -727,10 +604,7 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
       });
       draft.finalizationRequest ??= {
         ...DeliveryFinalization.request(draft),
-        if (draft.items.any(
-          (i) => i.requiresCatalogIdentity && i.catalogOnFinalize,
-        ))
-          'catalog_confirmed': true,
+        'finalize_by_code': true,
       };
       if (!await _save()) {
         return; // Persist the exact request before any network operation.
@@ -764,10 +638,11 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
       if (mounted) setState(() => error = finalizationError(e));
     } finally {
       if (mounted) {
-        setState(() {
-          busy = false;
-          confirmingFinalization = false;
-        });
+        setState(() => busy = false);
+        if (error != null) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(error!)));
+        }
       }
     }
   }
@@ -783,9 +658,10 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
       }
     }
     return PopScope(
-      canPop: !busy && !dirty,
+      canPop: !busy && !dirty && (editingLocked || !_metadataEdited),
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop || busy) return;
+        if (!editingLocked && _metadataEdited && !_applyMetadata()) return;
         setState(() => busy = true);
         final saved = await _save();
         if (!mounted) return;
@@ -803,21 +679,31 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Проверени ${draft.checkedCount} от ${draft.items.length} продукта',
+                  'Готови ${draft.readyCount} от ${draft.items.length} продукта',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 6),
                 LinearProgressIndicator(
                   value: draft.items.isEmpty
                       ? 0
-                      : draft.checkedCount / draft.items.length,
+                      : draft.readyCount / draft.items.length,
                 ),
                 const SizedBox(height: 8),
-                if (!finalizer.available)
-                  const Text(
-                    'Реалното финализиране изисква backend V2.',
-                    style: TextStyle(fontSize: 12),
+                if (!finalizer.available) ...[
+                  Text(
+                    finalizer is PocketBaseDeliveryFinalizer
+                        ? (finalizer as PocketBaseDeliveryFinalizer)
+                                  .capabilityProblem ??
+                              'Проверява се съвместимостта за финализиране.'
+                        : backendV2Required,
+                    style: const TextStyle(fontSize: 12),
                   ),
+                  if (widget.finalizer == null)
+                    TextButton(
+                      onPressed: busy ? null : _probeBackend,
+                      child: const Text('Провери връзката'),
+                    ),
+                ],
                 if ((draft.stagingRequest != null ||
                         draft.finalizationRequest != null) &&
                     draft.finalizationReceipt == null)
@@ -825,15 +711,26 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
                     'Има подготвена заявка без потвърден резултат. Данните са заключени; повторението използва същия ключ.',
                     style: TextStyle(fontSize: 12),
                   ),
-                if (!draft.allReviewed)
-                  const Text(
-                    'Проверете всички продукти, получени количества и срокове.',
-                    style: TextStyle(fontSize: 12),
+                if (draft.readyCount < draft.items.length)
+                  TextButton(
+                    onPressed: busy ? null : _showCorrections,
+                    child: Text(
+                      'За корекция: ${draft.items.length - draft.readyCount} • Отвори',
+                    ),
                   ),
-                if (draft.items.any((i) => parseQuantity(i.ordered) == null))
+                if (error != null)
+                  Text(
+                    error!,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                if (draft.documentDate.isNotEmpty &&
+                    parseDocumentDate(draft.documentDate) == null)
                   const Text(
-                    'Коригирайте заявените количества.',
-                    style: TextStyle(fontSize: 12),
+                    'Поправете датата на документа или я оставете празна.',
                   ),
                 const SizedBox(height: 8),
                 SizedBox(
@@ -849,7 +746,7 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
                                   DeliveryFinalization.errors(draft).isEmpty)
                         ? _finish
                         : null,
-                    icon: busy && !confirmingFinalization
+                    icon: busy
                         ? const SizedBox(
                             width: 20,
                             height: 20,
@@ -862,7 +759,9 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
                           : draft.stagingRequest != null ||
                                 draft.finalizationRequest != null
                           ? 'Провери приключването'
-                          : 'Приключи доставката',
+                          : busy
+                          ? 'Записване…'
+                          : 'Запази доставката',
                       style: const TextStyle(
                         fontSize: 17,
                         fontWeight: FontWeight.bold,
@@ -878,18 +777,14 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
           title: const Text('Приемане на доставка'),
           actions: [
             IconButton(
-              tooltip: 'Данни за документа',
-              onPressed: editingLocked ? null : _metadata,
-              icon: const Icon(Icons.edit_note),
-            ),
-            IconButton(
               tooltip: 'Запази чернова',
-              onPressed: editingLocked ? null : _save,
+              onPressed: editingLocked ? null : _saveMetadata,
               icon: const Icon(Icons.save_outlined),
             ),
           ],
         ),
         body: ListView(
+          controller: scroll,
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
           children: [
             Text(
@@ -913,27 +808,60 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
               icon: const Icon(Icons.photo_library_outlined),
               label: const Text('Избери снимки'),
             ),
-            if (busy && !confirmingFinalization)
-              const LinearProgressIndicator(),
+            if (busy) const LinearProgressIndicator(),
             Text(status, style: Theme.of(context).textTheme.bodySmall),
             if (error != null)
               SelectableText(
                 error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
-            if (!catalogAccess.available || !catalogAccess.canCreate)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(catalogAccess.message),
+            ExpansionTile(
+              title: const Text('Данни за документа'),
+              subtitle: Text(
+                draft.supplier.isEmpty
+                    ? 'Доставчик (при нужда)'
+                    : draft.supplier,
+              ),
+              children: [
+                TextField(
+                  controller: supplierInput,
+                  onChanged: (_) => setState(() {}),
+                  enabled: !editingLocked,
+                  decoration: const InputDecoration(labelText: 'Доставчик'),
                 ),
-              ),
-            if (draft.supplier.trim().isEmpty && draft.items.isNotEmpty)
-              OutlinedButton.icon(
-                onPressed: editingLocked ? null : _metadata,
-                icon: const Icon(Icons.local_shipping_outlined),
-                label: const Text('Попълни доставчик за документа'),
-              ),
+                TextField(
+                  controller: documentNumberInput,
+                  onChanged: (_) => setState(() {}),
+                  enabled: !editingLocked,
+                  decoration: const InputDecoration(
+                    labelText: 'Номер на документ',
+                  ),
+                ),
+                TextField(
+                  controller: documentDateInput,
+                  onChanged: (_) => setState(() {}),
+                  enabled: !editingLocked,
+                  decoration: const InputDecoration(
+                    labelText: 'Дата на документа',
+                    hintText: 'ДД.ММ.ГГГГ',
+                  ),
+                ),
+                Wrap(
+                  children: [
+                    TextButton(
+                      onPressed: editingLocked ? null : _saveMetadata,
+                      child: const Text('Запази данните'),
+                    ),
+                    TextButton(
+                      onPressed: editingLocked
+                          ? null
+                          : () => _saveMetadata(rememberSupplier: true),
+                      child: const Text('Запази и запомни доставчика'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
             if (catalogError != null)
               Card(
                 child: Padding(
@@ -941,7 +869,7 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
                   child: Column(
                     children: [
                       const Text(
-                        'Каталогът не е зареден. Изборът на продукт остава непотвърден.',
+                        'Каталогът не е зареден. Сървърът ще провери кодовете при запис.',
                       ),
                       SelectableText(catalogError!),
                       TextButton(
@@ -1098,7 +1026,7 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
             ),
             const SizedBox(height: 12),
             Text(
-              'Проверени ${draft.checkedCount} от ${draft.items.length}',
+              'Готови ${draft.readyCount} от ${draft.items.length}',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             Wrap(
@@ -1106,8 +1034,8 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
               children: [
                 for (final entry in const {
                   'all': 'Всички',
-                  'unchecked': 'Непроверени',
-                  'unclear': 'Неясни',
+                  'ready': 'Готови',
+                  'unclear': 'За корекция',
                 }.entries)
                   ChoiceChip(
                     label: Text(entry.value),
@@ -1116,33 +1044,23 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
                   ),
               ],
             ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(52),
-              ),
-              onPressed:
-                  editingLocked ||
-                      !draft.items.any((i) => i.validationErrors.isEmpty)
-                  ? null
-                  : _markAll,
-              icon: const Icon(Icons.done_all),
-              label: const Text('Маркирай всички — проверени'),
-            ),
+            SizedBox(key: rowsAnchor),
             for (final page in draft.pages)
               for (final item in page.items)
                 if (filter == 'all' ||
-                    filter == 'unchecked' && !item.checked ||
+                    filter == 'ready' && item.ready ||
                     filter == 'unclear' && item.unclear)
                   BulkReviewRow(
                     key: ValueKey(item.id),
                     item: item,
                     enabled: !editingLocked,
-                    productLabel: _rowStatus(item).label,
-                    productDetail: _rowStatus(item).detail,
-                    detailsLabel: _rowStatus(item).action,
-                    onAddCatalog: _rowStatus(item).canAdd
-                        ? () => _addCatalog(item)
-                        : null,
+                    automaticValidation: true,
+                    productLabel: item.productId != null
+                        ? 'Разпознат продукт'
+                        : item.proposedNewProduct
+                        ? 'Нов продукт'
+                        : 'Провери кода',
+                    productDetail: item.matchReason,
                     onChanged: () => _changed(item),
                     onDetails: () => _editItem(page, item),
                   ),
@@ -1162,16 +1080,19 @@ class _DeliveryEditorScreenState extends State<DeliveryEditorScreen> {
             ),
             const SizedBox(height: 16),
             Text(
-              draft.allReviewed
-                  ? 'Всички позиции са проверени. Доставката е готова за приключване.'
-                  : 'Проверете всички позиции преди финализиране.',
+              draft.allReady
+                  ? 'Всички позиции са валидни. Проверете физически количествата и сроковете преди запис.'
+                  : 'Коригирайте невалидните позиции преди запис.',
             ),
             const Text(
-              'Каталожният запис не променя количества. Партиди и входящи движения се записват само чрез „Приключи доставката“.',
+              '„Запази доставката“ потвърждава получените позиции. Неполучените (0) се запазват само в историята на документа.',
             ),
             const SizedBox(height: 16),
             TextButton.icon(
-              onPressed: editingLocked || draft.status != 'draft'
+              onPressed:
+                  busy ||
+                      draft.status != 'draft' ||
+                      draft.finalizationReceipt != null
                   ? null
                   : _deleteDraft,
               icon: const Icon(Icons.delete_outline),

@@ -1,5 +1,5 @@
 """Exact-version localhost integration tests; never connects to production."""
-import base64, argparse, concurrent.futures, copy, hashlib, json, os, pathlib, shutil, socket, sqlite3, subprocess, tempfile, time, urllib.request, urllib.error
+import base64, argparse, concurrent.futures, copy, datetime, hashlib, json, os, pathlib, shutil, socket, sqlite3, subprocess, tempfile, time, urllib.request, urllib.error
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 BACKEND=ROOT/'backend'
 PASSWORD='synthetic-test-only-40.4!'
@@ -10,7 +10,8 @@ def run_command(binary,args,env):
     return result.stdout
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--binary',default=str(ROOT/'build/backend-v2/runtime/bin/pocketbase.exe'));parser.add_argument('--bootstrap-only',action='store_true');parser.add_argument('--flutter',action='store_true');parser.add_argument('--catalog',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--binary',default=str(ROOT/'build/backend-v2/runtime/bin/pocketbase.exe'));parser.add_argument('--bootstrap-only',action='store_true');parser.add_argument('--flutter',action='store_true');parser.add_argument('--catalog',action='store_true');parser.add_argument('--hold-emulator',action='store_true');parser.add_argument('--without-product-fields',action='store_true');args=parser.parse_args()
+    if args.without_product_fields and (not args.catalog or args.bootstrap_only):parser.error('--without-product-fields requires --catalog without --bootstrap-only')
     binary=pathlib.Path(args.binary).resolve()
     version=run_command(binary,['--version'],os.environ.copy()).strip()
     assert version.endswith('version 0.40.4'),version
@@ -36,7 +37,8 @@ put('stock_movements',{id:'mov000000000001',batch:'bat000000000001',type:'receiv
         for source in (BACKEND/'catalog_v3/pb_hooks').rglob('*.js'):
             target=hooks/source.relative_to(BACKEND/'catalog_v3/pb_hooks');target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
         env['STORE_CATALOG_DELIVERY_FINALIZE_ENABLED']='approved';env['STORE_CATALOG_V3_ENABLED']='approved';env['STORE_CATALOG_V3_ACTIVATE']='I_HAVE_BACKUP_AND_TESTS';env['STORE_OCR_URL']='http://127.0.0.1:8765/ocr';env['STORE_OCR_PROVIDER']='paddle-v5'
-    (hooks/'test_fault.pb.js').write_text("onRecordCreateExecute(e=>{if($os.getenv('STORE_V2_TEST_FAULTS')==='LOCAL_ONLY' && e.record.getFloat('quantity')===13)throw new Error('TEST_ONLY_ROLLBACK');return e.next();},'stock_movements');",encoding='utf-8')
+    (hooks/'test_fault.pb.js').write_text("onRecordCreateExecute(e=>{if($os.getenv('STORE_V2_TEST_FAULTS')==='LOCAL_ONLY' && e.record.getFloat('quantity')===13)throw new Error('TEST_ONLY_ROLLBACK');return e.next();},'stock_movements');\nonRecordDeleteExecute(e=>{if($os.getenv('STORE_V2_TEST_FAULTS')==='LOCAL_ONLY' && e.record.getString('lot_number')==='TEST_DELETE_ROLLBACK')throw new Error('TEST_ONLY_DELETE_ROLLBACK');return e.next();},'batches');",encoding='utf-8')
+    shutil.copy2(BACKEND/'test/fixtures/capability_fault.pb.js',hooks/'test_capability_fault.pb.js')
     env['STORE_V2_TEST_FAULTS']='LOCAL_ONLY'
     flags=['--dir='+str(data),'--migrationsDir='+str(migrations),'--hooksDir='+str(hooks),'--automigrate=false']
     print('Runtime:',version,'\nIsolated workspace:',work,flush=True)
@@ -67,6 +69,11 @@ put('stock_movements',{id:'mov000000000001',batch:'bat000000000001',type:'receiv
     if args.catalog:
         for source in (BACKEND/'catalog_v3/activation_migrations').glob('*.js'):shutil.copy2(source,migrations/source.name)
         print(run_command(binary,['migrate','up',*flags],env),flush=True)
+    if args.without_product_fields:
+        (migrations/'1794355100_test_remove_product_fields.js').write_text(
+            """migrate(app=>{if($os.getenv('STORE_V2_TEST_SEED')!=='LOCAL_FIXTURES_ONLY')throw new Error('fixtures only');const c=app.findCollectionByNameOrId('products');for(const n of ['active','aliases','supplier_identifiers'])c.fields.removeByName(n);app.save(c);});""",
+            encoding='utf-8')
+        print(run_command(binary,['migrate','up',*flags],env),flush=True)
     with socket.socket() as listener:listener.bind(('127.0.0.1',0));port=listener.getsockname()[1]
     url='http://127.0.0.1:'+str(port)
     logfile=open(work/'server.log','w',encoding='utf-8')
@@ -85,7 +92,9 @@ put('stock_movements',{id:'mov000000000001',batch:'bat000000000001',type:'receiv
             chunks.append(('--'+boundary+'--\r\n').encode());payload=b''.join(chunks)
         request=urllib.request.Request(url+path,data=payload,headers=headers,method=method)
         try:
-            with urllib.request.urlopen(request,timeout=30) as response:return response.status,json.load(response)
+            with urllib.request.urlopen(request,timeout=30) as response:
+                raw=response.read()
+                return response.status,json.loads(raw) if raw else {}
         except urllib.error.HTTPError as error:
             return error.code,json.loads(error.read().decode() or '{}')
     try:
@@ -98,29 +107,120 @@ put('stock_movements',{id:'mov000000000001',batch:'bat000000000001',type:'receiv
         else:raise RuntimeError('Local server did not start')
         status,auth=api('POST','/api/collections/_superusers/auth-with-password',{'identity':'backend-test@example.test','password':PASSWORD});assert status==200,(status,auth);admin=auth['token']
         status,auth=api('POST','/api/collections/employees/auth-with-password',{'identity':'owner','password':PASSWORD});assert status==200,(status,auth);owner=auth['token']
+        if args.without_product_fields:
+            code,result=api('GET','/api/store/catalog/capabilities',token=owner)
+            assert code==200 and result['catalog'],(code,result)
+            code,result=api('GET','/api/store/capabilities',token=owner)
+            assert code==200 and result['atomic_finalization'] and result['draft_discard'] and result['expiry_handling'] is True and result['batch_deletion'] is True,(code,result)
+            execute_direct_code_tests(api,admin,owner)
+            manager=api('POST','/api/collections/employees/auth-with-password',{'identity':'manager','password':PASSWORD})[1]['token']
+            form={'form_version':2,'operation_key':'simple-no-legacy','product_id':'','expected_revision':0,
+                  'fields':{'name':'Product with no legacy fields','barcode':'000TEST-FORM','category':'Food'}}
+            code,result=api('POST','/api/store/catalog/products',form,manager)
+            assert code==200 and result['product']['barcode']=='000TEST-FORM',(code,result)
+            with sqlite3.connect(data/'data.db') as db:
+                assert not {'active','aliases','supplier_identifiers'}&{r[1] for r in db.execute('pragma table_info(products)')}
+                assert db.execute("select quantity from batches where id='bat000000000001'").fetchone()==(9,)
+            print('PASS Catalog and direct employee deliveries work without the three removed fields or any repair migration',flush=True)
         execute_tests(api,admin,owner,work)
-        if args.catalog:
+        if args.catalog and not args.without_product_fields:
             from test_catalog import execute_catalog_tests
             execute_catalog_tests(api,admin,owner,work)
             from test_delivery_catalog import execute_delivery_catalog_tests
             execute_delivery_catalog_tests(api,admin,owner,work)
+        if args.catalog:
+            from test_confirmed_finalization import execute_confirmed_tests
+            execute_confirmed_tests(api,admin,owner)
+        if args.catalog:
             from test_ocr_proxy import execute_ocr_proxy_tests
             execute_ocr_proxy_tests(api,owner,work,url)
+
         if args.flutter:
             flutter=shutil.which('flutter')
             if not flutter:raise RuntimeError('Flutter SDK not found')
-            completed=subprocess.run([flutter,'test','--no-pub','test/backend_v2_http_test.dart',*(['test/catalog_v3_http_test.dart'] if args.catalog else []),'--dart-define=PB_V2_TEST_URL='+url],cwd=ROOT,env=env,capture_output=True,text=True,shell=os.name=='nt')
+            completed=subprocess.run([flutter,'test','--no-pub','test/backend_v2_http_test.dart',*(['test/catalog_v3_http_test.dart'] if args.catalog and not args.without_product_fields else []),'--dart-define=PB_V2_TEST_URL='+url],cwd=ROOT,env=env,capture_output=True,text=True,shell=os.name=='nt')
             print(completed.stdout,flush=True)
             if completed.returncode:raise RuntimeError(completed.stderr+'\nFlutter SDK live-backend test failed')
             report=json.loads((ROOT/'build/backend-v2/latest-report.json').read_text());report['flutter_live_sdk']='passed'
             (ROOT/'build/backend-v2/latest-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
-            if args.catalog:
+            if args.catalog and not args.without_product_fields:
                 report_path=ROOT/'build/backend-v3/latest-report.json';catalog_report=json.loads(report_path.read_text(encoding='utf-8'));catalog_report['flutter_live_sdk']='passed';report_path.write_text(json.dumps(catalog_report,ensure_ascii=False,indent=2),encoding='utf-8')
+        if args.hold_emulator:
+            from emulator_fixture_server import hold_runtime
+            hold_runtime(ROOT,work,url)
     finally:
         process.terminate()
         try:process.wait(timeout=10)
         except subprocess.TimeoutExpired:process.kill();process.wait()
         logfile.close()
+
+def execute_direct_code_tests(api,admin,owner):
+    def ok(reply, status=200):
+        assert reply[0]==status,reply
+        return reply[1]
+    def rows(name):
+        return ok(api('GET','/api/collections/'+name+'/records?perPage=500',token=admin))['items']
+    def prepare(id,code,qty,name,expiry):
+        line={'line_id':'line1','source_row_id':'line1','page_id':'page1','name':name,
+              'supplier_code':code,'product_id':'','proposed_new':True,'requested_quantity':0,
+              'received_quantity':qty,'expiry_date':expiry,'lot_number':'','checked':True}
+        body={'client_id':id,'operation_key':'stage:'+id,'expected_revision':0,
+              'pages':[{'id':'page1','recognized':True}],'lines':[line]}
+        d=ok(api('POST','/api/store/drafts/stage',body,owner))
+        return d, {'operation_key':'finalize:'+d['delivery_id'],'expected_revision':d['revision'],'lines':[line]}
+    def finish(d,b,token=owner):
+        return api('POST','/api/store/deliveries/'+d['delivery_id']+'/finalize-by-code',b,token)
+    original_count=len(rows('products'))
+    a,p=prepare('directCodeA','000012345',2.5,'Milk','2026-11-21')
+    ok(finish(a,p,None),401)
+    first=ok(finish(a,p))
+    assert ok(finish(a,p))==first
+    second,request=prepare('directCodeB','000012345',8,'OCR name must not replace Milk','2026-12-10')
+    again=ok(finish(second,request))
+    product_id=first['lines'][0]['product_id']
+    assert again['lines'][0]['product_id']==product_id and len(rows('products'))==original_count+1
+    product=next(x for x in rows('products') if x['id']==product_id)
+    assert product['barcode']=='000012345' and product['name']=='Milk'
+    assert {(b['quantity'],b['expiry_date'][:10],b['lot_number']) for b in rows('batches') if b['product']==product_id}=={(2.5,'2026-11-21','N/A'),(8,'2026-12-10','N/A')}
+    ids=[first['delivery_id'],again['delivery_id']]
+    assert all(not row['supplier'] and not row['document_number'] and not row['document_date'] for row in rows('deliveries') if row['id'] in ids)
+    before=[len(rows(n)) for n in ('products','batches','stock_movements')]
+    zero,request=prepare('directCodeZero','000000',0,'Zero','2026-11-21')
+    skipped=ok(finish(zero,request))
+    assert skipped['lines'][0]['batch_id'] is None and skipped['lines'][0]['movement_id'] is None
+    assert ok(finish(zero,request))==skipped
+    missing,request=prepare('directCodeBlank','',2,'Blank code','2026-11-21')
+    ok(finish(missing,request),400)
+    fault,request=prepare('directCodeRollback','000FAULT',13,'Rollback','2026-11-21')
+    ok(finish(fault,request),409)
+    assert [len(rows(n)) for n in ('products','batches','stock_movements')]==before
+    # A staged delivery must be a complete preview, including not-received lines.
+    # Use a new stage operation rather than changing an already frozen request.
+    partial={'client_id':'partialMixed','operation_key':'stage:partialMixed','expected_revision':0,
+             'pages':[{'id':'page1','recognized':True}], 'lines':[
+                 {**request['lines'][0],'line_id':'received','source_row_id':'received',
+                  'supplier_code':'000PARTIAL','name':'Received','received_quantity':4},
+                 {**request['lines'][0],'line_id':'absent','source_row_id':'absent','name':'Absent product',
+                  'supplier_code':'000ABSENT','received_quantity':0,'expiry_date':''}]}
+    staged=ok(api('POST','/api/store/drafts/stage',partial,owner))
+    packet={'operation_key':'finalize:'+staged['delivery_id'],'expected_revision':staged['revision'],'lines':partial['lines']}
+    saved=ok(finish(staged,packet))
+    assert ok(finish(staged,packet))==saved
+    assert len([b for b in rows('batches') if b['delivery']==staged['delivery_id']])==1
+    assert not any(p['barcode']=='000ABSENT' for p in rows('products'))
+    assert next(l for l in saved['lines'] if l['line_id']=='absent')['batch_id'] is None
+    print('PASS partial by-code delivery skips absent products and inventory, exact replay has no duplicates',flush=True)
+    a,p=prepare('directConcurrentA','000RACE',4,'Concurrent milk','2026-12-01')
+    b,q=prepare('directConcurrentB','000RACE',6,'Concurrent milk','2026-12-08')
+    packets=[(a,p),(b,q)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        replies=list(pool.map(lambda args:finish(*args),packets))
+    for index,args in enumerate(packets):
+        if replies[index][0]==409: replies[index]=finish(*args)
+    receipts=[ok(r) for r in replies]
+    assert len({r['lines'][0]['product_id'] for r in receipts})==1
+    assert len([p for p in rows('products') if p['barcode']=='000RACE'])==1
+    print('PASS employee confirms exact article codes, separate quantities/dates, replay and rollback without approvals',flush=True)
 
 def execute_tests(api,admin,owner,work):
     results=[]
@@ -223,6 +323,33 @@ def execute_tests(api,admin,owner,work):
     # Legacy sentinel data is never backfilled or rewritten by the new workflow.
     old=next(r for r in table('batches') if r['id']=='bat000000000001');assert old['quantity']==9 and old['lot_number']=='OLD' and old['status']==''
     passed('legacy fixture records unchanged after all V2 operations')
+    # A finalized delivery remains protected even after its batches are removed.
+    historical=stage_body('expirehandle',qty=(2,3))
+    prepared=stage(historical)
+    code,res=finalize(prepared,finalize_request(prepared,historical));expect(code,res,200)
+    from test_batch_deletion import execute_batch_deletion_tests
+    execute_batch_deletion_tests(api,admin,owner,manager,stage,finalize,finalize_request,stage_body,table,passed,product_id)
+    # A lost stage response is recoverable by local client ID, and old packets cannot resurrect it.
+    disposable=stage_body('discardDraft')
+    prepared=stage(disposable)
+    remote=prepared['delivery_id']
+    packet={'client_id':disposable['client_id']}
+    path='/api/store/drafts/discard'
+    before_inventory={n:table(n) for n in ('products','batches','stock_movements')}
+    code,res=api('POST',path,packet);expect(code,res,401)
+    code,res=api('POST',path,packet,other);expect(code,res,200) # only the other employee's own namespace
+    assert any(row['id']==remote for row in table('deliveries'))
+    code,res=api('POST',path,packet,owner);expect(code,res,200)
+    assert res=={'status':'discarded','client_id':disposable['client_id']}
+    assert api('POST',path,packet,owner)==(200,res)
+    assert not any(row['id']==remote for row in table('deliveries'))
+    assert not any(row['delivery']==remote for name in ('delivery_items','delivery_pages') for row in table(name))
+    code,res=api('POST','/api/store/drafts/stage',disposable,owner);expect(code,res,409)
+    assert res['code']=='delivery_draft_discarded'
+    code,res=api('POST',path,{'client_id':'expirehandle'},owner);expect(code,res,409)
+    assert any(row['client_id']=='expirehandle' and row['status']=='finalized' for row in table('deliveries'))
+    assert {n:table(n) for n in before_inventory}==before_inventory
+    passed('staged draft discard is owner-scoped, repeatable, and cannot remove or resurrect finalized inventory')
     report={'runtime':'0.40.4','passed':results,'count':len(results),'workspace':str(work),'production_contacted':False}
     (work/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     (ROOT/'build/backend-v2/latest-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

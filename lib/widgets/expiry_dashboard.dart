@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:pocketbase/pocketbase.dart';
 
 import 'storeflow_brand.dart';
 
@@ -12,17 +15,22 @@ enum _BatchFilter { all, expired, soon }
 
 class ExpiryDashboard extends StatefulWidget {
   final String ownerId, employeeName;
-  final VoidCallback? onScan, onDrafts;
+  final VoidCallback? onScan, onDrafts, onAddBatch;
   final Future<List<ExpiryBatch>> Function()? loadBatches;
   final BatchCheckRepository? checkRepository;
+  final Future<void> Function(String, Map<String, dynamic>)? sendHandling;
+  final Future<void> Function()? checkHandlingCapability;
   const ExpiryDashboard({
     super.key,
     required this.ownerId,
     required this.employeeName,
     this.onScan,
     this.onDrafts,
+    this.onAddBatch,
     this.loadBatches,
     this.checkRepository,
+    this.sendHandling,
+    this.checkHandlingCapability,
   });
   @override
   State<ExpiryDashboard> createState() => ExpiryDashboardState();
@@ -34,22 +42,26 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
   List<ExpiryBatch> batches = [];
   List<Map<String, dynamic>> pending = [];
   bool loading = true, acting = false;
+  Future<void>? _refreshing;
   int refreshVersion = 0;
   final searchController = TextEditingController();
   _BatchFilter _filter = _BatchFilter.all;
   bool earliestFirst = true;
-  String? error;
+  String? error, syncError;
   DateTime? loadedAt;
+  Timer? _poll;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     refresh();
+    _poll = Timer.periodic(const Duration(seconds: 30), (_) => _pollBatches());
   }
 
   @override
   void dispose() {
     searchController.dispose();
+    _poll?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -59,21 +71,178 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
     if (state == AppLifecycleState.resumed) refresh();
   }
 
-  Future<void> refresh() async {
-    final version = ++refreshVersion;
-    if (!loading && mounted) setState(() => loading = true);
+  Future<void> _pollBatches() async {
+    if (!mounted ||
+        acting ||
+        loading ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.paused) {
+      return;
+    }
+    final version = refreshVersion;
     try {
       final records =
           await (widget.loadBatches?.call() ??
-              PocketBaseService.getExpiryBatches());
+              PocketBaseService.getExpiryBatches(includeClosed: true));
+      await _clearConfirmedClosed(records);
+      if (mounted && !acting && !loading && version == refreshVersion) {
+        setState(() {
+          batches = records.where((b) => !b.closed).toList();
+          loadedAt = DateTime.now();
+          error = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => error = PocketBaseService.errorMessage(e));
+    }
+  }
+
+  String _handlingError(Object e) {
+    if (e is ClientException) {
+      if (e.response['code'] == 'incompatible_batch_dependency' ||
+          e.response['code'] == 'unsupported_batch_dependency') {
+        return 'Партидата има несъвместима зависимост. Нищо не е изтрито; необходим е преглед на свързаната схема.';
+      }
+      if (e.response['code'] == 'batch_deletion_confirmation_required') {
+        return 'Необходимо е ново изрично потвърждение за окончателно изтриване. Обновете приложението.';
+      }
+      if (e.response['code'] == 'batch_deletion_not_confirmed') {
+        return 'Окончателното изтриване не е потвърдено. Данните са запазени; опитайте отново със същата заявка.';
+      }
+      if (e.statusCode == 404 && e.response['code'] == 'batch_not_found') {
+        return 'Партидата вече не е достъпна. Опреснете списъка и проверете записа.';
+      }
+      if (e.statusCode == 404) {
+        return 'На сървъра липсва маршрутът за премахване на партида. Необходимо е качване на expiry_handling.pb.js и lib/handle_expiry.js.';
+      }
+      if (e.statusCode == 401 || e.statusCode == 403) {
+        return 'Сесията е изтекла или нямате права. Влезте отново преди повторен опит.';
+      }
+      if (e.statusCode == 409) {
+        return 'Партидата е променена. Опреснете списъка, отменете старата заявка и потвърдете актуалния запис.';
+      }
+      if (e.statusCode == 503) {
+        return 'Маршрутът не потвърждава защитената схема за приключване на партиди.';
+      }
+    }
+    return PocketBaseService.errorMessage(e);
+  }
+
+  Future<void> _retry(Map<String, dynamic> command) async {
+    if (acting || loading) return;
+    await repository.setRetry(
+      widget.ownerId,
+      command['operation_key'] as String,
+    );
+    if (mounted) await refresh();
+  }
+
+  Future<void> _clearConfirmedClosed(List<ExpiryBatch> records) async {
+    final closed = records.where((b) => b.closed).map((b) => b.id).toSet();
+    if (closed.isEmpty) return;
+    final commands = await repository.list(widget.ownerId);
+    for (final command in commands.where(
+      (c) => c['kind'] == 'handled' && closed.contains(c['batch']),
+    )) {
+      await repository.cancel(
+        widget.ownerId,
+        command['operation_key'] as String,
+      );
+    }
+    final remaining = await repository.list(widget.ownerId);
+    if (mounted) {
+      setState(() {
+        pending = remaining;
+        syncError = remaining
+            .map((c) => c['sync_error'])
+            .whereType<String>()
+            .firstOrNull;
+      });
+    }
+  }
+
+  Future<void> refresh() async {
+    if (acting) return;
+    await _refresh();
+  }
+
+  Future<void> _refresh() =>
+      _refreshing ??= _loadAndSync().whenComplete(() => _refreshing = null);
+
+  Future<void> _loadAndSync() async {
+    final version = ++refreshVersion;
+    if (!loading && mounted) setState(() => loading = true);
+    try {
       final commands = await repository.list(widget.ownerId);
+      if (!mounted || version != refreshVersion) return;
+      setState(() => pending = commands);
+      String? failure;
+      final sendable = commands
+          .where(
+            (p) =>
+                p['kind'] == 'delete_batch' &&
+                p['sync_status'] != 'retry_required',
+          )
+          .toList();
+      if (sendable.isNotEmpty && widget.checkHandlingCapability != null) {
+        try {
+          await widget.checkHandlingCapability!();
+        } catch (e) {
+          failure = _handlingError(e);
+          for (final command in sendable) {
+            await repository.setRetry(
+              widget.ownerId,
+              command['operation_key'] as String,
+              failure: failure,
+            );
+          }
+          sendable.clear(); // No POST to an unadvertised route; keep the queue.
+        }
+      }
+      for (final command in sendable) {
+        try {
+          await (widget.sendHandling ?? PocketBaseService.sendExpiryHandling)(
+            widget.ownerId,
+            command,
+          );
+          if (mounted && version == refreshVersion) {
+            setState(
+              () => batches.removeWhere((b) => b.id == command['batch']),
+            );
+          }
+          await repository.cancel(
+            widget.ownerId,
+            command['operation_key'] as String,
+          );
+        } catch (e) {
+          failure = _handlingError(e);
+          await repository.setRetry(
+            widget.ownerId,
+            command['operation_key'] as String,
+            failure: failure,
+          );
+        }
+      }
+      final remaining = await repository.list(widget.ownerId);
+      if (!mounted || version != refreshVersion) return;
+      setState(() {
+        pending = remaining;
+        syncError =
+            failure ??
+            remaining
+                .map((p) => p['sync_error'])
+                .whereType<String>()
+                .firstOrNull;
+      });
+      final records =
+          await (widget.loadBatches?.call() ??
+              PocketBaseService.getExpiryBatches(includeClosed: true));
+      await _clearConfirmedClosed(records);
       if (mounted && version == refreshVersion) {
         setState(() {
           batches = records.where((b) => !b.closed).toList()
             ..sort(
               (a, b) => (a.days ?? 0x7fffffff).compareTo(b.days ?? 0x7fffffff),
             );
-          pending = commands;
           error = null;
           loadedAt = DateTime.now();
         });
@@ -88,105 +257,109 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
     }
   }
 
-  Future<void> _action(ExpiryBatch batch, String kind) async {
-    if (acting) return;
-    setState(() => acting = true);
-    final quantity = TextEditingController(text: kind == 'none' ? '0' : '');
-    final reason = TextEditingController();
-    try {
-      var validation = '';
-      final approved = await showDialog<bool>(
-        context: context,
-        builder: (context) => StatefulBuilder(
-          builder: (context, update) => AlertDialog(
-            title: Text(
-              kind == 'none'
-                  ? 'Няма останали'
-                  : kind == 'waste'
-                  ? 'Потвърди бракуване'
-                  : 'Има останали',
-            ),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('${batch.productName}\nПартида: ${batch.lot}'),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Ще се запази неизпратена заявка на този телефон. Сървърната история и предупрежденията остават непроменени до синхронизация.',
-                  ),
-                  if (kind != 'none') ...[
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: quantity,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
+  void _showSyncDetails() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Подробности за синхронизацията'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(
+                [
+                  if (error != null) 'Списък с партиди: $error',
+                  if (syncError != null) 'Изпращане на заявки: $syncError',
+                ].join('\n\n'),
+              ),
+              for (final command in pending) ...[
+                Text('Партида: ${command['batch']}'),
+                Wrap(
+                  children: [
+                    if (command['kind'] == 'delete_batch')
+                      TextButton(
+                        onPressed: acting || loading
+                            ? null
+                            : () {
+                                Navigator.pop(context);
+                                _retry(command);
+                              },
+                        child: const Text('Повтори'),
                       ),
-                      decoration: InputDecoration(
-                        labelText: kind == 'waste'
-                            ? 'Действително бракувано количество'
-                            : 'Физически преброени бройки',
-                      ),
+                    TextButton(
+                      onPressed: acting || loading
+                          ? null
+                          : () {
+                              Navigator.pop(context);
+                              _cancel(command);
+                            },
+                      child: const Text('Отмени локалната заявка'),
                     ),
                   ],
-                  if (kind == 'waste') ...[
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: reason,
-                      decoration: const InputDecoration(
-                        labelText: 'Причина за бракуване',
-                      ),
-                    ),
-                  ],
-                  if (validation.isNotEmpty)
-                    Text(
-                      validation,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Отказ'),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  // Repository also validates; dialog remains open for correction.
-                  final count = double.tryParse(
-                    quantity.text.trim().replaceAll(',', '.'),
-                  );
-                  if (count == null ||
-                      !count.isFinite ||
-                      (kind != 'none' && count <= 0) ||
-                      (kind == 'waste' && reason.text.trim().isEmpty)) {
-                    update(
-                      () => validation =
-                          'Въведете положително количество и причина при брак.',
-                    );
-                    return;
-                  }
-                  Navigator.pop(context, true);
-                },
-                child: const Text('Потвърди и запази заявка'),
-              ),
+                ),
+              ],
             ],
           ),
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Затвори'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handle(
+    ExpiryBatch batch, {
+    required bool replacingLegacy,
+  }) async {
+    if (acting || loading) return;
+    setState(() => acting = true);
+    try {
+      final approved = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Премахни от списъка'),
+          content: Text(
+            '${batch.productName}\n'
+            '${batch.barcode.isEmpty ? '' : 'Баркод: ${batch.barcode}\n'}'
+            'Годност до ${batch.dateLabel}\n\n'
+            'Тази партида ще бъде изтрита окончателно от PocketBase. Продуктът, другите партиди и движенията ще се запазят. Действието не може да бъде отменено от приложението.'
+            '${replacingLegacy ? '\nТова заменя старата неизпратена проверка за същия запис.' : ''}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Отказ'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Потвърди'),
+            ),
+          ],
+        ),
       );
-      if (approved == true) {
-        await repository.prepare(
-          owner: widget.ownerId,
-          batch: batch,
-          kind: kind,
-          quantity: quantity.text,
-          reason: reason.text,
+      if (approved != true || !mounted) return;
+      await repository.prepare(
+        owner: widget.ownerId,
+        batch: batch,
+        kind: 'delete_batch',
+        quantity: '0',
+      );
+      if (mounted) await _refresh();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              pending.any((p) => p['batch'] == batch.id)
+                  ? 'Не е потвърдено от PocketBase. Заявката е запазена за ръчен повторен опит.'
+                  : 'Партидата е изтрита окончателно от PocketBase.',
+            ),
+          ),
         );
-        final commands = await repository.list(widget.ownerId);
-        if (mounted) setState(() => pending = commands);
       }
     } catch (e) {
       if (mounted) {
@@ -195,45 +368,46 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
         ).showSnackBar(SnackBar(content: Text('Заявката не е записана: $e')));
       }
     } finally {
-      // Modal text fields are unmounted after their closing animation.
-      await Future<void>.delayed(const Duration(milliseconds: 250));
-      quantity.dispose();
-      reason.dispose();
       if (mounted) setState(() => acting = false);
     }
   }
 
   Future<void> _cancel(Map<String, dynamic> command) async {
-    final yes = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Отмени неизпратената заявка?'),
-        content: const Text('Няма да се променят сървърни записи.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Назад'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Отмени заявката'),
-          ),
-        ],
-      ),
-    );
-    if (yes != true) return;
+    if (acting || loading) return;
+    setState(() => acting = true);
     try {
+      final yes = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Отмени неизпратената заявка?'),
+          content: const Text(
+            'Ще се спре повторното изпращане от този телефон. Вече потвърден запис в PocketBase няма да бъде върнат.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Назад'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Отмени заявката'),
+            ),
+          ],
+        ),
+      );
+      if (yes != true || !mounted) return;
       await repository.cancel(
         widget.ownerId,
         command['operation_key'] as String,
       );
-      final commands = await repository.list(widget.ownerId);
-      if (mounted) setState(() => pending = commands);
+      if (mounted) await _refresh();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('$e')));
       }
+    } finally {
+      if (mounted) setState(() => acting = false);
     }
   }
 
@@ -244,7 +418,8 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
     final visible =
         batches.where((batch) {
           final state = ExpiryState.of(batch);
-          return batch.productName.toLowerCase().contains(query) &&
+          return (batch.productName.toLowerCase().contains(query) ||
+                  batch.barcode.contains(query)) &&
               switch (_filter) {
                 _BatchFilter.all => true,
                 _BatchFilter.expired => state == ExpiryState.expired,
@@ -305,6 +480,12 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
                             icon: const Icon(Icons.document_scanner_outlined),
                             label: const Text('Сканирай доставка'),
                           ),
+                          if (widget.onAddBatch != null)
+                            OutlinedButton.icon(
+                              onPressed: widget.onAddBatch,
+                              icon: const Icon(Icons.qr_code),
+                              label: const Text('Добави срок по баркод'),
+                            ),
                           OutlinedButton(
                             onPressed: widget.onDrafts,
                             child: const Text('Чернови'),
@@ -351,7 +532,12 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
                                         : 'Обновяването е неуспешно. Показани са последните заредени данни.',
                                   ),
                                   const SizedBox(height: AppSpacing.small),
-                                  SelectableText(error!),
+                                  TextButton(
+                                    onPressed: _showSyncDetails,
+                                    child: const Text(
+                                      'Подробности за синхронизацията',
+                                    ),
+                                  ),
                                   TextButton(
                                     onPressed: loading ? null : refresh,
                                     child: const Text('Опитай отново'),
@@ -394,7 +580,7 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
                         onChanged: (_) => setState(() {}),
                         decoration: InputDecoration(
                           labelText: 'Търси продукт',
-                          hintText: 'Име на продукт',
+                          hintText: 'Име или баркод',
                           prefixIcon: const Icon(Icons.search),
                           suffixIcon: query.isEmpty
                               ? null
@@ -458,6 +644,19 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
                           ),
                         ],
                       ),
+                      if (syncError != null || pending.isNotEmpty)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Има непотвърдени заявки'),
+                          subtitle: const Text(
+                            'Отворете подробностите за повторен опит или отмяна на локалната заявка.',
+                          ),
+                          trailing: IconButton(
+                            tooltip: 'Подробности за синхронизацията',
+                            icon: const Icon(Icons.info_outline),
+                            onPressed: _showSyncDetails,
+                          ),
+                        ),
                       if (loadedAt != null && visible.isEmpty && !loading)
                         Padding(
                           padding: const EdgeInsets.symmetric(
@@ -508,44 +707,43 @@ class ExpiryDashboardState extends State<ExpiryDashboard>
                     return ExpiryBatchCard(
                       key: ValueKey('batch-${batch.id}'),
                       batch: batch,
-                      actions: commands.isNotEmpty
-                          ? Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Неизпратена проверка на този телефон. Не е отразена в PocketBase.',
-                                ),
-                                TextButton(
-                                  onPressed: () => _cancel(commands.first),
-                                  child: const Text(
-                                    'Отмени неизпратената заявка',
-                                  ),
-                                ),
-                              ],
-                            )
-                          : Wrap(
-                              spacing: AppSpacing.small,
-                              children: [
-                                TextButton(
-                                  onPressed: acting
-                                      ? null
-                                      : () => _action(batch, 'none'),
-                                  child: const Text('Няма останали'),
-                                ),
-                                TextButton(
-                                  onPressed: acting
-                                      ? null
-                                      : () => _action(batch, 'count'),
-                                  child: const Text('Има останали'),
-                                ),
-                                TextButton(
-                                  onPressed: acting
-                                      ? null
-                                      : () => _action(batch, 'waste'),
-                                  child: const Text('Бракуване'),
-                                ),
-                              ],
+                      actions: Wrap(
+                        spacing: AppSpacing.small,
+                        children: [
+                          if (commands.isNotEmpty) ...[
+                            const Text(
+                              'Неизпратена проверка на този телефон. Не е отразена в PocketBase.',
                             ),
+                            if (commands.first['kind'] == 'delete_batch')
+                              TextButton(
+                                onPressed: acting || loading
+                                    ? null
+                                    : () => _retry(commands.first),
+                                child: const Text('Опитай синхронизация'),
+                              )
+                            else
+                              const Text(
+                                'Стара проверка: потвърдете обработването отново.',
+                              ),
+                            TextButton(
+                              onPressed: acting || loading
+                                  ? null
+                                  : () => _cancel(commands.first),
+                              child: const Text('Отмени неизпратената заявка'),
+                            ),
+                          ],
+                          if (!commands.any((p) => p['kind'] == 'delete_batch'))
+                            TextButton(
+                              onPressed: acting || loading
+                                  ? null
+                                  : () => _handle(
+                                      batch,
+                                      replacingLegacy: commands.isNotEmpty,
+                                    ),
+                              child: const Text('Премахни от списъка'),
+                            ),
+                        ],
+                      ),
                     );
                   },
                 ),

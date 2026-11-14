@@ -84,7 +84,6 @@ void main() {
         '31.02.2026',
         '13.17.2026',
         '08.11 2026',
-        '2026-11-08',
       ]) {
         expect(parseDocumentDate(input), isNull, reason: input);
       }

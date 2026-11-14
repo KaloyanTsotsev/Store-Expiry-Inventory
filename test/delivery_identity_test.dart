@@ -124,25 +124,30 @@ void main() {
     expect(p.data['quantity'], 999);
     expect(p.data['lot_number'], 'OLD');
   });
-  test('Ambiguous, unverified, inactive or malformed code blocks only affected row', () {
-    for (final records in [
-      [product('a'), product('b')],
-      [product('a', verified: false)],
-      [product('a', active: false)],
-    ]) {
-      final item = line();
-      ProductMatcher.prepare(item, records, 'А');
-      expect(item.productId, isNull);
+  test(
+    'Ambiguous, unverified or malformed legacy code blocks only affected row',
+    () {
+      for (final records in [
+        [product('a'), product('b')],
+        [product('a', verified: false)],
+      ]) {
+        final item = line();
+        ProductMatcher.prepare(item, records, 'А');
+        expect(item.productId, isNull);
+        expect(item.proposedNewProduct, isFalse);
+        expect(item.validationErrors, isNotEmpty);
+      }
+      final item = line()..supplierCode = '9?00';
+      ProductMatcher.prepare(item, [], 'А');
       expect(item.proposedNewProduct, isFalse);
-      expect(item.validationErrors, isNotEmpty);
-    }
-    final item = line()..supplierCode = '9?00';
-    ProductMatcher.prepare(item, [], 'А');
-    expect(item.proposedNewProduct, isFalse);
-    final good = line();
-    ProductMatcher.prepare(good, [product('a')], 'А');
-    expect(good.productId, 'a');
-  });
+      final historical = line();
+      ProductMatcher.prepare(historical, [product('a', active: false)], 'А');
+      expect(historical.productId, 'a');
+      final good = line();
+      ProductMatcher.prepare(good, [product('a')], 'А');
+      expect(good.productId, 'a');
+    },
+  );
   test('Repeated OCR and same code with two dates/lots keeps independent rows, resets confirmations', () {
     final response = jsonDecode(
       File('test/fixtures/paddle/http-test-v2.json').readAsStringSync(),

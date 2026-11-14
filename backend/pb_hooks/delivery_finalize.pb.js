@@ -4,3 +4,7 @@ routerAdd('POST','/api/store/deliveries/{id}/finalize',e=>require(__hooks+'/lib/
 routerAdd('POST','/api/store/deliveries/{id}/pages/{page}/photo',e=>require(__hooks+'/lib/handlers.js').photo(e),$apis.requireAuth('employees'),$apis.bodyLimit(16777216));
 
 routerAdd('GET','/api/store/deliveries/{id}/status',e=>require(__hooks+'/lib/handlers.js').status(e),$apis.requireAuth('employees'));
+
+routerAdd('POST','/api/store/drafts/discard',e=>require(__hooks+'/lib/handlers.js').discard(e),$apis.requireAuth('employees'),$apis.bodyLimit(4096));
+
+routerAdd('POST','/api/store/deliveries/{id}/finalize-by-code',e=>require(__hooks+'/lib/handlers.js').finalizeByCode(e),$apis.requireAuth('employees'),$apis.bodyLimit(2097152));

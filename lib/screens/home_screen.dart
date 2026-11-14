@@ -5,6 +5,7 @@ import '../theme/app_theme.dart';
 import '../widgets/expiry_dashboard.dart';
 import 'deliveries_screen.dart';
 import 'login_screen.dart';
+import 'known_product_batch_screen.dart';
 import 'products_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -35,7 +36,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _logout() {
+  Future<void> _addBatch(String ownerId) async {
+    final saved = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => KnownProductBatchScreen(ownerId: ownerId),
+      ),
+    );
+    if (mounted && saved == true) await dashboard.currentState?.refresh();
+  }
+
+  Future<void> _logout() async {
+    if (!mounted) return;
     PocketBaseService.logout();
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -91,6 +103,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ownerId: user?.id ?? '',
             employeeName: name,
             onScan: openingScanner ? null : _scan,
+            onAddBatch: user == null ? null : () => _addBatch(user.id),
             onDrafts: () => setState(() => section = 1),
           ),
         ),

@@ -21,6 +21,8 @@ DeliveryDraft reviewedDraft({int count = 1}) => DeliveryDraft(
         for (var i = 0; i < count; i++)
           DraftItem(
             name: 'Кисело мляко $i',
+            supplierCode: '000$i',
+            articleBarcode: true,
             ordered: '12',
             received: '6',
             expiry: '08.11.2026',
@@ -103,12 +105,47 @@ Future<void> _editor(
 
 Future<void> confirm(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('finish-delivery')));
-  await tester.pumpAndSettle();
-  await tester.tap(find.widgetWithText(FilledButton, 'Потвърди и приключи'));
   await tester.pump();
 }
 
 void main() {
+  testWidgets(
+    'Partial-delivery summary shows accepted and absent lines, cancel does not persist',
+    (tester) async {
+      final draft = reviewedDraft(count: 2);
+      draft.items.last.received = '0';
+      draft.items.last.expiry = '';
+      final repo = _Repository();
+      final client = _Finalizer();
+      await _editor(tester, draft, repo, finalizer: client);
+      await tester.tap(find.byKey(const Key('finish-delivery')));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(
+        find.textContaining('Ще бъдат записани 1 позиции.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Пропуснати: 1'), findsOneWidget);
+      expect(client.requests, isEmpty);
+      await tester.tap(find.widgetWithText(TextButton, 'Отказ'));
+      await tester.pumpAndSettle();
+      expect(client.requests, isEmpty);
+      expect(draft.status, 'draft');
+      expect(draft.items.last.received, '0');
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+  test('An unconfirmed transaction is not reported as an already-processed delivery', () {
+    final message = finalizationError(
+      ClientException(
+        statusCode: 409,
+        response: {'code': 'transaction_not_confirmed'},
+      ),
+    );
+    expect(message, contains('не е потвърдено'));
+    expect(message, contains('запазена'));
+    expect(message, isNot(contains('вече е обработена')));
+  });
   test('Small decimal discrepancies remain visible in the final summary', () {
     expect(DeliveryFinalization.differenceText(1.235, 1.234), '0.001');
     expect(DeliveryFinalization.differenceText(6, 12), '-6.00');
@@ -119,7 +156,7 @@ void main() {
     expect(DeliveryFinalization.errors(draft), isEmpty);
     final item = draft.items.single;
     item.checked = false;
-    expect(DeliveryFinalization.errors(draft), isNotEmpty);
+    expect(DeliveryFinalization.errors(draft), isEmpty);
     item.checked = true;
     item.received = 'NaN';
     expect(DeliveryFinalization.errors(draft), isNotEmpty);
@@ -128,8 +165,10 @@ void main() {
     expect(DeliveryFinalization.errors(draft), isNotEmpty);
     item.received = '0';
     expect(DeliveryFinalization.errors(draft), isEmpty);
+    item.received = '6';
+    item.expiry = '08.11.2026';
     item.ordered = 'неясно';
-    expect(DeliveryFinalization.errors(draft), isNotEmpty);
+    expect(DeliveryFinalization.errors(draft), isEmpty);
     expect(
       DeliveryFinalization.errors(DeliveryDraft(ownerId: 'employee1')),
       isNotEmpty,
@@ -172,28 +211,19 @@ void main() {
       expect(tester.getRect(button), before);
       await tester.tap(button);
       await tester.pumpAndSettle();
-      expect(find.text('Позиции: 20'), findsOneWidget);
-      expect(find.text('Разлика: -6.00'), findsNWidgets(20));
-      expect(find.text(backendV2Required), findsOneWidget);
-      expect(
-        tester
-            .widget<FilledButton>(
-              find.widgetWithText(FilledButton, 'Потвърди и приключи'),
-            )
-            .onPressed,
-        isNull,
-      );
-      await tester.tap(find.text('Назад към проверката'));
-      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
       expect(draft.status, 'draft');
       expect(draft.finalizationRequest, isNull);
       expect(draft.checkedCount, 20);
+      expect(repo.snapshots, isNotEmpty);
+      expect(
+        (repo.snapshots.last['pages'] as List).first['items'],
+        hasLength(20),
+      );
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
-  testWidgets('Unchecked or invalid expiry disables sticky button', (
-    tester,
-  ) async {
+  testWidgets('Invalid expiry disables sticky button', (tester) async {
     final draft = reviewedDraft();
     draft.items.single.expiry = '1';
     await _editor(tester, draft, _Repository());
@@ -218,11 +248,6 @@ void main() {
       final press = tester.widget<FilledButton>(button).onPressed!;
       press();
       press();
-      await tester.pumpAndSettle();
-      expect(find.byType(AlertDialog), findsOneWidget);
-      await tester.tap(
-        find.widgetWithText(FilledButton, 'Потвърди и приключи'),
-      );
       await tester.pump();
       expect(client.requests, hasLength(1));
       expect(repo.snapshots.last['finalizationRequest'], isNotNull);

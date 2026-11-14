@@ -4,7 +4,7 @@ import 'package:pocketbase/pocketbase.dart';
 
 /// Read-only SDK probe. Deliberately anonymous; does not test employee access.
 Future<void> main() async {
-  final pb = PocketBase('http://192.168.1.200:8090');
+  final pb = PocketBase('http://192.168.100.46:8090');
   try {
     final records = await pb.collection('products').getFullList(sort: 'name');
     stdout.writeln(

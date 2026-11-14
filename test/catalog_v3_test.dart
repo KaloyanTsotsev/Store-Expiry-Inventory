@@ -54,8 +54,22 @@ class _Ocr extends OcrEngine {
 }
 
 class _Catalog extends ProductCatalogService {
-  _Catalog({this.manager = true});
-  final bool manager;
+  _Catalog({this.manager = true, this.admin = false});
+  final bool manager, admin;
+  int deletionRequests = 0;
+  @override
+  bool get isAdmin => admin;
+  @override
+  Future<Map<String, dynamic>> deleteProduct(
+    Map<String, dynamic> request,
+  ) async {
+    deletionRequests++;
+    throw ClientException(
+      statusCode: 409,
+      response: {'code': 'catalog_product_has_history'},
+    );
+  }
+
   Map<String, dynamic>? submitted;
   bool? proposed;
   @override
@@ -194,11 +208,11 @@ void main() {
             home: MediaQuery(
               data: const MediaQueryData(textScaler: TextScaler.linear(2)),
               child: ProductFormScreen(
+                catalog: _Catalog(),
                 product: product(
                   'long',
                   name: 'Дълго продуктово име с марка и разфасовка',
                 ),
-                catalog: _Catalog(),
               ),
             ),
           ),
@@ -239,7 +253,14 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(manual);
       await tester.pumpAndSettle();
-      expect(find.byType(DeliveryItemScreen), findsOneWidget);
+      expect(find.byType(DeliveryItemScreen), findsNothing);
+      final nameField = find.byKey(ValueKey('${photo.items.single.id}_name'));
+      await tester.scrollUntilVisible(
+        nameField,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(nameField, findsOneWidget);
       expect(draft.pages, hasLength(1));
       expect(photo.imagePath, 'missing-test-photo.jpg');
       expect(photo.recognized, isTrue);
@@ -261,7 +282,7 @@ void main() {
       expect(gtinKey(code), isNotNull, reason: code);
     }
     for (final code in [
-      '90001',
+      '90 001',
       '4006381333932',
       '4OO6381333931',
       '',
@@ -313,67 +334,70 @@ void main() {
       isFalse,
     );
   });
-  test('Conflicting barcode, supplier code, aliases and inactive identifiers stop automatic matching', () {
-    final a = product(
-      'a',
-      barcode: '4006381333931',
-      aliases: ['КИС МЛ 3.6 400'],
-    );
-    final b = product(
-      'b',
-      name: 'Друг',
-      barcode: '4006381333931',
-      codes: [
-        {'supplier': 'А', 'code': '1', 'verified': true},
-      ],
-      aliases: ['КИС МЛ 3.6 400'],
-    );
-    expect(
-      ProductMatcher.match(DraftItem(barcode: '4006381333931'), [
-        a,
-        b,
-      ], '').conflict,
-      isTrue,
-    );
-    expect(
-      ProductMatcher.match(
-        DraftItem(barcode: '4006381333931', supplierCode: '1'),
-        [
-          a,
-          product(
-            'b',
-            name: 'Друг',
-            codes: [
-              {'supplier': 'А', 'code': '1', 'verified': true},
-            ],
-          ),
+  test(
+    'Conflicting identifiers stop matching; historical active flag does not',
+    () {
+      final a = product(
+        'a',
+        barcode: '4006381333931',
+        aliases: ['КИС МЛ 3.6 400'],
+      );
+      final b = product(
+        'b',
+        name: 'Друг',
+        barcode: '4006381333931',
+        codes: [
+          {'supplier': 'А', 'code': '1', 'verified': true},
         ],
-        'А',
-      ).conflict,
-      isTrue,
-    );
-    expect(
-      ProductMatcher.match(DraftItem(name: 'КИС МЛ 3.6 400'), [
-        a,
-        b,
-      ], '').conflict,
-      isTrue,
-    );
-    expect(
-      ProductMatcher.match(DraftItem(barcode: '4006381333931'), [
-        product('inactive', barcode: '4006381333931', active: false),
-      ], '').conflict,
-      isTrue,
-    );
-    expect(
-      ProductMatcher.match(
-        DraftItem(name: a.data['name'], barcode: '96385074'),
-        [a],
-        '',
-      ).conflict,
-      isTrue,
-    );
-  });
+        aliases: ['КИС МЛ 3.6 400'],
+      );
+      expect(
+        ProductMatcher.match(DraftItem(barcode: '4006381333931'), [
+          a,
+          b,
+        ], '').conflict,
+        isTrue,
+      );
+      expect(
+        ProductMatcher.match(
+          DraftItem(barcode: '4006381333931', supplierCode: '1'),
+          [
+            a,
+            product(
+              'b',
+              name: 'Друг',
+              codes: [
+                {'supplier': 'А', 'code': '1', 'verified': true},
+              ],
+            ),
+          ],
+          'А',
+        ).conflict,
+        isTrue,
+      );
+      expect(
+        ProductMatcher.match(DraftItem(name: 'КИС МЛ 3.6 400'), [
+          a,
+          b,
+        ], '').conflict,
+        isTrue,
+      );
+      expect(
+        ProductMatcher.match(DraftItem(barcode: '4006381333931'), [
+          product('inactive', barcode: '4006381333931', active: false),
+        ], '').conflict,
+        isFalse,
+      );
+      expect(
+        ProductMatcher.match(
+          DraftItem(name: a.data['name'], barcode: '96385074'),
+          [a],
+          '',
+        ).conflict,
+        isTrue,
+      );
+    },
+  );
   test('Bulgarian English, abbreviations and OCR typos are suggestions until alias approval', () {
     for (final pair in [
       ('КИС МЛ 3.6 400', 'Кисело мляко 3.6% 400 г'),
@@ -495,12 +519,93 @@ void main() {
         expect(api.submitted!['expected_revision'], 3);
         expect(api.proposed, !manager);
         expect(api.submitted!['fields']['name'], 'Коригирано мляко');
+        expect((api.submitted!['fields'] as Map).keys.toSet(), {
+          'name',
+          'barcode',
+          'category',
+        });
         expect(find.text('Отвори'), findsOneWidget);
       },
     );
   }
+  for (final (role, manager, admin) in [
+    ('employee', false, false),
+    ('manager', true, false),
+    ('admin', true, true),
+  ]) {
+    testWidgets('Minimal product form for $role; supplier section is removed', (
+      tester,
+    ) async {
+      final api = _Catalog(manager: manager, admin: admin);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ProductFormScreen(
+            product: product(
+              'existing',
+              barcode: '000ABC',
+              aliases: ['Alias'],
+              active: false,
+            ),
+            catalog: api,
+            catalogAccess: CatalogAccess(
+              available: true,
+              canCreate: manager,
+              canDeleteProduct: manager,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(TextFormField), findsNWidgets(3));
+      for (final label in ['Име на продукт', 'Код', 'Категория']) {
+        expect(find.text(label), findsOneWidget);
+      }
+      expect(find.text('Продукт existing'), findsNothing);
+      expect(find.text('Алтернативни имена'), findsNothing);
+      expect(find.byType(SwitchListTile), findsNothing);
+      expect(find.text('Кодове по доставчик'), findsNothing);
+      expect(
+        find.text('Изтрий продукт'),
+        manager ? findsOneWidget : findsNothing,
+      );
+    });
+  }
   testWidgets(
-    'Catalog blocks duplicate names and invalid GTIN without sending writes',
+    'Delete is not sent before confirmation and protected history stays visible',
+    (tester) async {
+      final api = _Catalog();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ProductFormScreen(
+            product: product('history'),
+            catalog: api,
+            catalogAccess: const CatalogAccess(
+              available: true,
+              canCreate: true,
+              canDeleteProduct: true,
+            ),
+          ),
+        ),
+      );
+      final delete = find.text('Изтрий продукт');
+      await tester.ensureVisible(delete);
+      await tester.tap(delete);
+      await tester.pumpAndSettle();
+      expect(api.deletionRequests, 0);
+      await tester.tap(find.text('Отказ'));
+      await tester.pumpAndSettle();
+      expect(api.deletionRequests, 0);
+      await tester.tap(delete);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Изтрий'));
+      await tester.pumpAndSettle();
+      expect(api.deletionRequests, 1);
+      expect(find.textContaining('Не може да бъде изтрит'), findsOneWidget);
+      expect(find.text('Редактиране на продукт'), findsOneWidget);
+    },
+  );
+  testWidgets(
+    'Catalog blocks duplicate names and invalid article codes without sending writes',
     (tester) async {
       final api = _Catalog();
       await tester.pumpWidget(
@@ -521,12 +626,12 @@ void main() {
       expect(api.submitted, isNull);
       expect(find.textContaining('Възможен дубликат:'), findsOneWidget);
       await tester.ensureVisible(find.byType(TextFormField).at(1));
-      await tester.enterText(find.byType(TextFormField).at(1), '90001');
+      await tester.enterText(find.byType(TextFormField).at(1), '90 001');
       await tester.ensureVisible(find.text('Запази продукта'));
       await tester.tap(find.text('Запази продукта'));
       await tester.pumpAndSettle();
       expect(api.submitted, isNull);
-      expect(find.text('Невалиден GTIN-8/12/13/14'), findsOneWidget);
+      expect(find.text('Въведете валиден артикулен код.'), findsOneWidget);
     },
   );
 }

@@ -6,6 +6,8 @@ import 'package:expiry_tracker/models/delivery_draft.dart';
 import 'package:expiry_tracker/services/delivery_finalization_service.dart';
 import 'package:expiry_tracker/services/draft_repository.dart';
 import 'package:expiry_tracker/services/pocketbase_service.dart';
+import 'package:expiry_tracker/services/paddle_document_adapter.dart';
+import 'package:expiry_tracker/services/product_matcher.dart';
 
 void main() {
   const url = String.fromEnvironment('PB_V2_TEST_URL');
@@ -133,7 +135,7 @@ void main() {
         : false,
   );
   test(
-    'Real SDK employee bulk catalog finalization and exact replay',
+    'Real SDK employee direct barcode finalization and exact replay',
     () async {
       final pb = PocketBaseService.pb, original = PocketBaseService.pb.baseURL;
       try {
@@ -145,26 +147,25 @@ void main() {
           for (var i = 0; i < 3; i++)
             DraftItem(
               name: 'SDK bulk product $i',
-              supplierCode: 'SDK-BULK-$i',
-              ordered: '12',
+              supplierCode: '000SDK-BULK-$i',
+              ordered: '',
               received: '8',
               expiry: '22.11.2026',
               lot: 'N/A',
               requiresCatalogIdentity: true,
               proposedNewProduct: true,
-              catalogOnFinalize: true,
+              articleBarcode: true,
               checked: true,
             ),
         ];
         final draft = DeliveryDraft(
           ownerId: pb.authStore.record!.id,
-          supplier: 'SDK bulk supplier',
           pages: [DraftPage(imagePath: '', recognized: true, items: rows)],
         );
         await client.prepare(draft, () async {});
         final request = {
           ...DeliveryFinalization.request(draft),
-          'catalog_confirmed': true,
+          'finalize_by_code': true,
         };
         final receipt = await client.finalize(draft.serverId!, request);
         expect(receipt['status'], 'finalized');
@@ -174,11 +175,8 @@ void main() {
           final p = await pb
               .collection('products')
               .getOne(line['product_id'] as String);
-          expect(p.data['barcode'], isEmpty);
-          expect(
-            (p.data['supplier_identifiers'] as List).single['supplier'],
-            'SDK bulk supplier',
-          );
+          expect(p.getStringValue('barcode'), startsWith('000SDK-BULK-'));
+          expect(p.data['supplier_identifiers'] ?? [], isEmpty);
         }
       } finally {
         pb.baseURL = original;
@@ -189,4 +187,154 @@ void main() {
         ? 'Run via backend/tool/test_backend.py --catalog --flutter'
         : false,
   );
+  test('Real 37-row Paddle document: correct, save, reuse, dashboard, replay', () async {
+    final uri = Uri.parse(url);
+    if (uri.host != '127.0.0.1' || uri.port == 8090) {
+      throw StateError('Only isolated test PocketBase is permitted');
+    }
+    final pb = PocketBaseService.pb, original = PocketBaseService.pb.baseURL;
+    final root = await Directory.systemTemp.createTemp('paddle-37-sdk-');
+    try {
+      pb.baseURL = url;
+      await PocketBaseService.login('owner', 'synthetic-test-only-40.4!');
+      final client = PocketBaseDeliveryFinalizer();
+      await client.probe();
+      final json = jsonDecode(
+        File('test/fixtures/paddle/http-test-v2.json').readAsStringSync(),
+      ) as Map<String, dynamic>;
+      final rows = PaddleDocumentAdapter().parse(json).items;
+      expect(rows, hasLength(37));
+      final repo = DraftRepository(rootDirectory: () async => root);
+      Future<Map<String, dynamic>> commit(DeliveryDraft draft) async {
+        expect(draft.allReady, isTrue);
+        // Explicit final Save confirms the displayed data, not the OCR import.
+        for (final item in draft.items) {
+          item.checked = item.ready;
+        }
+        await client.prepare(draft, () => repo.save(draft));
+        draft.finalizationRequest = {
+          ...DeliveryFinalization.request(draft),
+          'finalize_by_code': true,
+        };
+        await repo.save(draft);
+        final receipt = await client.finalize(
+          draft.serverId!,
+          draft.finalizationRequest!,
+        );
+        draft.finalizationReceipt = receipt;
+        draft.status = 'finalized';
+        draft.serverRevision = receipt['revision'] as int;
+        await repo.save(draft);
+        return receipt;
+      }
+
+      // A prior delivery establishes one real catalog identity, with its own batch.
+      final previous = DraftItem(
+        name: 'Каталожно мляко',
+        supplierCode: rows.first.supplierCode,
+        received: '3',
+        expiry: '01.12.2026',
+        lot: 'OLD',
+        articleBarcode: true,
+        proposedNewProduct: true,
+      );
+      final first = DeliveryDraft(
+        ownerId: pb.authStore.record!.id,
+        pages: [
+          DraftPage(imagePath: '', recognized: true, items: [previous]),
+        ],
+      );
+      final earlier = await commit(first);
+      final existingId = (earlier['lines'] as List).single['product_id'];
+      final products = await PocketBaseService.getProducts();
+      var corrected = 0;
+      for (final item in rows) {
+        item.articleBarcode = true;
+        ProductMatcher.prepare(item, products, '');
+        expect(item.checked, isFalse);
+        if (parseDocumentDate(item.expiry) == null) {
+          expect(item.ready, isFalse);
+          // Synthetic employee correction, never inferred from OCR's "1".
+          item.edit('expiry', '25.11.2026');
+          corrected++;
+        }
+        expect(item.ready, isTrue, reason: item.validationErrors.join(', '));
+      }
+      expect(corrected, 14);
+      expect(rows.first.productId, existingId);
+      expect(rows.first.name, 'Каталожно мляко');
+      final draft = DeliveryDraft(
+        ownerId: pb.authStore.record!.id,
+        pages: [
+          DraftPage(
+            imagePath: File('test/fixtures/paddle/document.jpg').absolute.path,
+            text: jsonEncode(json),
+            recognized: true,
+            items: rows,
+          ),
+        ],
+      );
+      expect(draft.readyCount, 37);
+      final receipt = await commit(draft);
+      expect(receipt['lines'], hasLength(37));
+      expect(
+        await client.finalize(draft.serverId!, draft.finalizationRequest!),
+        receipt,
+      );
+      final batches = await pb
+          .collection('batches')
+          .getFullList(
+            filter: pb.filter('delivery = {:id}', {'id': draft.serverId}),
+          );
+      expect(batches, hasLength(37));
+      for (var i = 0; i < rows.length; i++) {
+        final saved = (receipt['lines'] as List).singleWhere(
+          (line) => line['line_id'] == rows[i].id,
+        );
+        final product = await pb
+            .collection('products')
+            .getOne(saved['product_id'] as String);
+        final batch = batches.singleWhere((b) => b.id == saved['batch_id']);
+        expect(product.getStringValue('barcode'), rows[i].supplierCode);
+        expect(batch.get<num>('quantity'), parseQuantity(rows[i].received));
+        expect(
+          batch.getStringValue('expiry_date').substring(0, 10),
+          parseDocumentDate(rows[i].expiry)!.toIso8601String().substring(0, 10),
+        );
+      }
+      final codeMatches = await pb
+          .collection('products')
+          .getFullList(
+            filter: pb.filter('barcode = {:code}', {
+              'code': rows.first.supplierCode,
+            }),
+          );
+      expect(codeMatches, hasLength(1));
+      final oldBatch = await pb
+          .collection('batches')
+          .getOne((earlier['lines'] as List).single['batch_id'] as String);
+      expect(
+        oldBatch.getStringValue('expiry_date').substring(0, 10),
+        '2026-12-01',
+      );
+      expect(oldBatch.get<num>('quantity'), 3);
+      final dashboard = await PocketBaseService.getExpiryBatches();
+      expect(
+        dashboard
+            .map((b) => b.id)
+            .toSet()
+            .containsAll(batches.map((b) => b.id)),
+        isTrue,
+      );
+      final restored = await repo.load(draft.ownerId, draft.id);
+      expect(restored.status, 'finalized');
+      expect(restored.finalizationReceipt, receipt);
+      final remote = await pb.collection('deliveries').getOne(draft.serverId!);
+      expect(remote.getStringValue('status'), 'finalized');
+    } finally {
+      pb.baseURL = original;
+      pb.authStore.clear();
+      await root.delete(recursive: true);
+    }
+  }, skip: url.isEmpty ? 'Run via isolated backend harness --flutter' : false);
 }

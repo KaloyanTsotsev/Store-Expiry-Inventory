@@ -39,11 +39,16 @@ function lines(values) {
   }).sort((a, b) => a.line_id < b.line_id ? -1 : a.line_id > b.line_id ? 1 : 0);
 }
 
-function finalize(store, actorId, deliveryId, body, sha256) {
+function finalize(store, actorId, deliveryId, body, sha256, byCode=false) {
   if (!body || !/^[a-zA-Z0-9:_-]{1,128}$/.test(body.operation_key || '') ||
     !Number.isSafeInteger(body.expected_revision) || body.expected_revision < 0) fail(400, 'invalid_request');
   const requested = lines(body.lines);
-  const hash = sha256(canonical({kind:'finalize',target:deliveryId,expected_revision:body.expected_revision,lines:requested}));
+  if (byCode && requested.some(line => line.received_quantity > 0 && !line.supplier_code)) {
+    fail(400, 'missing_code_or_positive_quantity');
+  }
+  const fingerprint = {kind:'finalize',target:deliveryId,expected_revision:body.expected_revision,lines:requested};
+  if (byCode) fingerprint.by_code = true; // Preserve the hash for already-issued legacy requests.
+  const hash = sha256(canonical(fingerprint));
   // All reads and writes below use a transactional store bound to txApp.
   const actor = store.employee(actorId);
   if (!actor) fail(401, 'employee_auth_required');
@@ -69,6 +74,13 @@ function finalize(store, actorId, deliveryId, body, sha256) {
   const operation = store.createOperation(actorId, body.operation_key, deliveryId, hash);
   const products = store.products();
   const createdByName = new Map();
+  const byBarcode = new Map();
+  if (byCode) {
+    for (const product of products) {
+      const key = String(product.barcode || '').trim();
+      if (key) byBarcode.set(key, (byBarcode.get(key) || []).concat(product));
+    }
+  }
   const responseLines = [];
   for (const item of staged) {
     const line = stagedLines.find(row => row.line_id === item.line.line_id);
@@ -76,23 +88,41 @@ function finalize(store, actorId, deliveryId, body, sha256) {
       responseLines.push({line_id:line.line_id,product_id:line.product_id,batch_id:null,movement_id:null}); continue;
     }
     let product;
-    if (line.product_id) {
+    if (byCode) {
+      const matches = byBarcode.get(line.supplier_code) || [];
+      if (matches.length > 1) fail(409, 'conflicting_article_barcode');
+      if (matches.length) {
+        product = matches[0];
+        if (line.product_id && line.product_id !== product.id) {
+          fail(409, 'conflicting_article_barcode');
+        }
+      } else {
+        if (line.product_id) {
+          const selected=products.find(p=>p.id===line.product_id);
+          if(!selected || String(selected.barcode||'').trim())fail(409,'conflicting_article_barcode');
+          product=store.assignProductCode(selected,line.supplier_code);
+        } else {
+          if (!line.proposed_new) fail(409, 'product_resolution_required');
+          product = store.createProduct(line.name, line.supplier_code);
+        }
+        byBarcode.set(line.supplier_code, [product]);
+      }
+    } else if (line.product_id) {
       product = products.find(p => p.id === line.product_id);
-      if (!product || !product.active) fail(409, 'selected_product_missing_or_inactive');
+      if (!product) fail(409, 'selected_product_missing');
     } else {
       const key = nameKey(line.name);
       const matches = products.filter(p => nameKey(p.name) === key);
       if (matches.length > 1 || (createdByName.has(key) && createdByName.get(key) !== line.supplier_code)) fail(409, 'product_resolution_required');
       if (matches.length === 1) {
         product = matches[0];
-        if (!product.active) fail(409, 'product_resolution_required');
       } else {
         // Supplier article is kept on the delivery line; never used as EAN.
         product = store.createProduct(line.name);
         products.push(product); createdByName.set(key,line.supplier_code);
       }
     }
-    store.resolveItem(item.id, product.id, line.lot_number);
+    store.resolveItem(item.id, product.id, line.lot_number, byCode ? product.name : undefined);
     // ALWAYS one new record per positive delivery item. No product/lot/expiry
     // upsert: N/A and distinct expiry groups must never merge.
     const batchId = store.createBatch(deliveryId, item.id, product.id, line, actorId);

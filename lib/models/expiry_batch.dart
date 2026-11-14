@@ -12,7 +12,7 @@ class ExpiryBatch {
   final int warningDays;
   final bool customWarning;
   final num? quantity;
-  final String unit;
+  final String unit, barcode;
   ExpiryBatch({
     required this.id,
     required this.productName,
@@ -25,6 +25,7 @@ class ExpiryBatch {
     required this.customWarning,
     this.quantity,
     this.unit = '',
+    this.barcode = '',
   });
 
   static DateTime? dateOnly(String value) {
@@ -78,6 +79,7 @@ class ExpiryBatch {
       quantity: quantity is num && quantity.isFinite && quantity >= 0
           ? quantity
           : null,
+      barcode: product?.getStringValue('barcode').trim() ?? '',
       unit:
           (record.data['unit'] ?? product?.data['unit'])?.toString().trim() ??
           '',
@@ -100,7 +102,7 @@ class ExpiryBatch {
       : days! < 0
       ? 'Изтекъл — провери и отстрани от продажба'
       : days! <= warningDays
-      ? 'Наближава изтичане — прецени за намаление'
+      ? 'Наближава изтичане — провери срока'
       : 'В срок';
   String get dateLabel => expiry == null
       ? 'Неизвестен'

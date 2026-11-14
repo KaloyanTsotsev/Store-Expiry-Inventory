@@ -106,7 +106,7 @@ void main() {
     expect(DeliveryFinalization.errors(draft), isNotEmpty);
   });
   test('Missing/unreliable values never become invented dates, lots, or quantities', () {
-    for (final value in [null, '1', '2026-02-31', '08.11.2026']) {
+    for (final value in [null, '1', '2026-02-31', '08.11 2026']) {
       final item = adapter
           .parse({
             'status': 'ok',

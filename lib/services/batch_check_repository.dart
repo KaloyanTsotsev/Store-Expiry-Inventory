@@ -42,11 +42,12 @@ class BatchCheckRepository {
     String reason = '',
   }) {
     final count = parseQuantity(quantity);
-    if (batch.closed ||
-        !['none', 'count', 'waste'].contains(kind) ||
+    if ((batch.closed && kind != 'delete_batch') ||
+        !['none', 'count', 'waste', 'handled', 'delete_batch'].contains(kind) ||
         count == null ||
-        (kind == 'none' && count != 0) ||
-        (kind != 'none' && count <= 0) ||
+        ((kind == 'none' || kind == 'handled' || kind == 'delete_batch') &&
+            count != 0) ||
+        (!['none', 'handled', 'delete_batch'].contains(kind) && count <= 0) ||
         (kind == 'waste' && reason.trim().isEmpty)) {
       return Future.error(
         ArgumentError(
@@ -56,8 +57,16 @@ class BatchCheckRepository {
     }
     final operation = _pending.catchError((Object _) {}).then<void>((_) async {
       final items = await list(owner);
-      if (items.any((j) => j['batch'] == batch.id)) {
+      if (items.any(
+        (j) =>
+            j['batch'] == batch.id &&
+            (!['handled', 'delete_batch'].contains(kind) || j['kind'] == kind),
+      )) {
         throw StateError('Вече има неизпратена проверка за тази партида.');
+      }
+      if (kind == 'handled' || kind == 'delete_batch') {
+        // Explicit reconfirmation supersedes old local-only checks on this row.
+        items.removeWhere((j) => j['batch'] == batch.id);
       }
       items.add({
         'operation_key': newDraftId(),
@@ -66,7 +75,9 @@ class BatchCheckRepository {
         'kind': kind,
         'quantity': count,
         'reason': reason.trim(),
-        'expected_revision': batch.revision,
+        'expected_revision': batch.revision ?? 0,
+        if (kind == 'handled' || kind == 'delete_batch')
+          'expiry_date': batch.expiry?.toIso8601String().substring(0, 10) ?? '',
         'observed_at_local': DateTime.now().toUtc().toIso8601String(),
         'sync_status': 'not_sent',
       });
@@ -82,6 +93,21 @@ class BatchCheckRepository {
       items.removeWhere(
         (i) => i['operation_key'] == operationKey && i['employee'] == owner,
       );
+      await _write(owner, items);
+    });
+    _pending = operation;
+    return operation;
+  }
+
+  /// Failed operations remain durable, but require an explicit retry instead
+  /// of an endless background loop (especially for missing hooks/auth/conflicts).
+  Future<void> setRetry(String owner, String key, {String? failure}) {
+    final operation = _pending.catchError((Object _) {}).then<void>((_) async {
+      final items = await list(owner);
+      for (final item in items.where((i) => i['operation_key'] == key)) {
+        item['sync_status'] = failure == null ? 'not_sent' : 'retry_required';
+        item['sync_error'] = failure;
+      }
       await _write(owner, items);
     });
     _pending = operation;

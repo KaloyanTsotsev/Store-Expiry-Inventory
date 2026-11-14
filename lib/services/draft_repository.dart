@@ -7,12 +7,18 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../models/delivery_draft.dart';
+import 'pocketbase_service.dart';
 
 class DraftRepository {
   final Future<Directory> Function() rootDirectory;
   Future<void> _pending = Future.value();
-  DraftRepository({Future<Directory> Function()? rootDirectory})
-    : rootDirectory = rootDirectory ?? getApplicationSupportDirectory;
+  final Future<void> Function(String, String) discardServer;
+  List<String> damagedDraftIds = const [];
+  DraftRepository({
+    Future<Directory> Function()? rootDirectory,
+    Future<void> Function(String, String)? discardServer,
+  }) : rootDirectory = rootDirectory ?? getApplicationSupportDirectory,
+       discardServer = discardServer ?? PocketBaseService.discardDeliveryDraft;
 
   Future<Directory> _owner(String ownerId) async {
     if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(ownerId)) {
@@ -98,13 +104,26 @@ class DraftRepository {
     await _pending.catchError((Object _) {});
     final folder = await _owner(ownerId);
     final drafts = <DeliveryDraft>[];
-    await for (final entry in folder.list()) {
+    final damaged = <String>[];
+    await for (final entry in folder.list(followLinks: false)) {
       if (entry is Directory) {
         final id = entry.uri.pathSegments.where((s) => s.isNotEmpty).last;
-        if (await File('${folder.path}/.deleted_$id').exists()) continue;
-        drafts.add(await load(ownerId, id));
+        if (!RegExp(r'^[a-zA-Z0-9]+$').hasMatch(id) ||
+            await File('${folder.path}/.deleted_$id').exists()) {
+          continue;
+        }
+        try {
+          drafts.add(await load(ownerId, id));
+        } on FormatException {
+          damaged.add(id);
+        } on TypeError {
+          damaged.add(id);
+        } on FileSystemException {
+          damaged.add(id);
+        }
       }
     }
+    damagedDraftIds = List.unmodifiable(damaged);
     drafts.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     return drafts;
   }
@@ -156,16 +175,34 @@ class DraftRepository {
     final root = await rootDirectory();
     final pending = File('${root.path}/pending_delivery_picker.json');
     if (!await pending.exists()) return null;
-    final json = jsonDecode(await pending.readAsString()) as Map;
+    Map<String, dynamic>? json;
+    try {
+      final decoded = jsonDecode(await pending.readAsString());
+      if (decoded is Map<String, dynamic>) json = decoded;
+    } on FormatException {
+      return null; // Preserve the malformed picker marker for inspection.
+    }
+    if (json == null || json['id'] is! String) return null;
     // Do not consume another employee's recovered images.
     if (json['ownerId'] != ownerId) return null;
+    final id = json['id'] as String;
+    final replacingPage = json['replacingPage'];
+    if (!RegExp(r'^[a-zA-Z0-9]+$').hasMatch(id)) return null;
+    final drafts = await list(ownerId);
+    final draft = drafts
+        .where(
+          (d) =>
+              d.id == id &&
+              d.status == 'draft' &&
+              d.stagingRequest == null &&
+              d.finalizationRequest == null,
+        )
+        .firstOrNull;
+    if (draft == null) return null;
     final lost = await picker.retrieveLostData();
     if (lost.exception != null) throw lost.exception!;
-    final draft = await load(ownerId, json['id'] as String);
     for (final image in lost.files ?? <XFile>[]) {
-      final index = draft.pages.indexWhere(
-        (p) => p.id == json['replacingPage'],
-      );
+      final index = draft.pages.indexWhere((p) => p.id == replacingPage);
       final page = await importImage(
         draft,
         image,
@@ -185,7 +222,10 @@ class DraftRepository {
 
   Future<Directory> _verifiedFolder(DeliveryDraft draft) async {
     final owner = await _owner(draft.ownerId);
-    final folder = await _folder(draft);
+    if (!RegExp(r'^[a-zA-Z0-9]+$').hasMatch(draft.id)) {
+      throw ArgumentError('Невалидна чернова.');
+    }
+    final folder = Directory('${owner.path}/${draft.id}');
     final parent = await owner.resolveSymbolicLinks();
     final root = await (await rootDirectory()).resolveSymbolicLinks();
     final expectedOwner =
@@ -232,37 +272,92 @@ class DraftRepository {
     await cleanupUnusedImages(draft);
   }
 
-  /// Local drafts only. Server delivery deletion requires the protected endpoint
-  /// described in the V3 server contract and is never attempted here.
+  Future<void> _clearOwnedPicker(String employeeId, String id) async {
+    final root = await rootDirectory();
+    final picker = File('${root.path}/pending_delivery_picker.json');
+    if (!await picker.exists()) return;
+    try {
+      final pending = jsonDecode(await picker.readAsString());
+      if (pending is Map &&
+          pending['ownerId'] == employeeId &&
+          pending['id'] == id) {
+        await picker.delete();
+      }
+    } on FormatException {
+      // A damaged picker marker must not make the already removed draft reappear.
+    } on FileSystemException {
+      // An inaccessible marker is ignored by recovery once the draft is gone.
+    }
+  }
+
   Future<void> deleteDraft(DeliveryDraft draft, {required String employeeId}) {
     if (draft.ownerId != employeeId ||
         draft.status != 'draft' ||
-        draft.finalizationRequest != null ||
-        draft.stagingRequest != null) {
+        draft.finalizationReceipt != null) {
       return Future.error(
         StateError('Може да изтриете само собствена незавършена чернова.'),
       );
     }
     final operation = _pending.catchError((Object _) {}).then<void>((_) async {
       final stored = await load(employeeId, draft.id);
-      if (stored.status != 'draft' ||
-          stored.finalizationRequest != null ||
-          stored.stagingRequest != null) {
+      if (stored.status != 'draft' || stored.finalizationReceipt != null) {
         throw StateError('Финализирана доставка не се изтрива.');
       }
       final folder = await _verifiedFolder(stored);
-      final owner = await _owner(employeeId);
-      await File('${owner.path}/.deleted_${draft.id}')
-          .writeAsString('deleted', flush: true);
-      await folder.delete(recursive: true);
-      final root = await rootDirectory();
-      final picker = File('${root.path}/pending_delivery_picker.json');
-      if (await picker.exists()) {
-        final pending = jsonDecode(await picker.readAsString()) as Map;
-        if (pending['ownerId'] == employeeId && pending['id'] == draft.id) {
-          await picker.delete();
-        }
+      if (stored.serverId != null ||
+          stored.finalizationRequest != null ||
+          stored.stagingRequest != null ||
+          draft.serverId != null ||
+          draft.finalizationRequest != null ||
+          draft.stagingRequest != null) {
+        // Client ID covers a lost stage response. A server refusal keeps local evidence.
+        await discardServer(employeeId, stored.id);
       }
+      final owner = await _owner(employeeId);
+      final marker = File('${owner.path}/.deleted_${draft.id}');
+      await marker.writeAsString('deleted', flush: true);
+      try {
+        await folder.delete(recursive: true);
+      } catch (_) {
+        await marker.delete();
+        rethrow;
+      }
+      await _clearOwnedPicker(employeeId, draft.id);
+    });
+    _pending = operation;
+    return operation;
+  }
+
+  /// A corrupt snapshot may conceal a finalized server delivery. Move it out of
+  /// the active list reversibly, without any server operation or data deletion.
+  Future<void> quarantineDamagedDraft(String ownerId, String id) {
+    final operation = _pending.catchError((Object _) {}).then<void>((_) async {
+      try {
+        await load(ownerId, id);
+        throw StateError(
+          'Черновата е четима. Използвайте нормалното изтриване.',
+        );
+      } on FormatException {
+        // Recoverable malformed snapshot.
+      } on TypeError {
+        // Recoverable malformed snapshot.
+      } on FileSystemException {
+        // A missing snapshot may still have photos in its verified folder.
+      }
+      final folder = await _verifiedFolder(
+        DeliveryDraft(ownerId: ownerId, id: id),
+      );
+      final owner = await _owner(ownerId);
+      final marker = File('${owner.path}/.deleted_$id');
+      if (await marker.exists()) return;
+      await marker.writeAsString('quarantined', flush: true);
+      try {
+        await folder.rename('${owner.path}/.quarantine_${id}_${newDraftId()}');
+      } catch (_) {
+        await marker.delete();
+        rethrow;
+      }
+      await _clearOwnedPicker(ownerId, id);
     });
     _pending = operation;
     return operation;

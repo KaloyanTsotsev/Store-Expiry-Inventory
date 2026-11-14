@@ -113,12 +113,7 @@ void main() {
       expect(request.method, 'POST');
       expect(request.headers.value('authorization'), token);
       final body = jsonDecode(await utf8.decoder.bind(request).join());
-      expect(body, {
-        'name': 'Milk',
-        'barcode': '00123',
-        'category': '',
-        'active': true,
-      });
+      expect(body, {'name': 'Milk', 'barcode': '00123', 'category': ''});
       request.response.headers.contentType = ContentType.json;
       request.response.write(jsonEncode({'id': 'product1', ...body}));
       await request.response.close();

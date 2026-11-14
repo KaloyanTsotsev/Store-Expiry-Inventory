@@ -4,13 +4,16 @@ import '../models/delivery_draft.dart';
 import 'pocketbase_service.dart';
 
 class CatalogAccess {
-  final bool available, canCreate, canFinalizeDelivery;
+  final bool available, canCreate, canFinalizeDelivery, articleBarcode;
+  final bool canDeleteProduct;
   final String message;
   final int? statusCode;
   const CatalogAccess({
     required this.available,
     this.canCreate = false,
     this.canFinalizeDelivery = false,
+    this.articleBarcode = false,
+    this.canDeleteProduct = false,
     this.message = '',
     this.statusCode,
   });
@@ -33,6 +36,8 @@ class ProductCatalogService {
       final ready = result['protocol'] == 3 && result['catalog'] == true;
       return CatalogAccess(
         available: ready,
+        articleBarcode: ready && result['delivery_article_barcode'] == true,
+        canDeleteProduct: ready && result['can_delete_product'] == true,
         canCreate: ready && result['can_manage'] == true,
         canFinalizeDelivery:
             ready && result['delivery_catalog_finalize'] == true,
@@ -52,6 +57,13 @@ class ProductCatalogService {
             ? 'Каталог V3 не е внедрен (HTTP 404). Управител трябва да одобри каталожния backend. OCR редовете остават в черновата.'
             : e.statusCode == 401 || e.statusCode == 403
             ? 'Няма разрешен достъп до Catalog V3. Проверете служителската сесия и правата.'
+            : e.statusCode == 503
+            ? switch (e.response['code']) {
+                'catalog_rules_not_active' || 'catalog_schema_unavailable' => 'Схемата или защитните правила на каталога са непълни. Черновата е запазена.',
+                'catalog_unique_index_required' =>
+                  'Липсва защитният индекс на каталога. Черновата е запазена.',
+                _ => 'Каталог V3 не е активен. Черновата е запазена.',
+              }
             : 'Каталог V3 е недостъпен (HTTP ${e.statusCode}). Черновата и OCR данните са запазени.',
       );
     } catch (_) {
@@ -69,6 +81,18 @@ class ProductCatalogService {
         'admin',
         'manager',
       ].contains(PocketBaseService.pb.authStore.record?.data['role']);
+
+  bool get isAdmin =>
+      PocketBaseService.pb.authStore.isValid &&
+      PocketBaseService.pb.authStore.record?.collectionName == 'employees' &&
+      PocketBaseService.pb.authStore.record?.data['role'] == 'admin';
+
+  Future<Map<String, dynamic>> deleteProduct(Map<String, dynamic> request) =>
+      PocketBaseService.pb.send<Map<String, dynamic>>(
+        '/api/store/catalog/products/delete',
+        method: 'POST',
+        body: request,
+      );
 
   Future<List<RecordModel>> history(String productId) => PocketBaseService.pb
       .collection('product_catalog_audit')
@@ -134,6 +158,14 @@ class ProductCatalogService {
       final known = <String, String>{
         'catalog_manager_required':
             'Само управител или администратор може да редактира каталога.',
+        'catalog_supplier_admin_required':
+            'Само администратор може да променя кодовете по доставчик.',
+        'catalog_product_has_history': 'Продуктът е свързан с партиди, доставки или история. Не може да бъде изтрит.',
+        'catalog_product_not_found':
+            'Продуктът вече не е в каталога. Обновете списъка.',
+        'catalog_delete_schema_required':
+            'Сървърът не може да провери всички връзки. Продуктът не е изтрит.',
+        'invalid_catalog_form': 'Проверете името, кода и категорията.',
         'conflicting_barcode':
             'Баркодът е свързан с друг продукт. Проверете двата записа.',
         'conflicting_supplier_identifier':

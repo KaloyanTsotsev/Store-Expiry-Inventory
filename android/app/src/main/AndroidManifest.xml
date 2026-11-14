@@ -8,6 +8,7 @@
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
 
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -21,7 +22,7 @@
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
-<!--            ssh -N -o ExitOnForwardFailure=yes -L 8090:127.0.0.1:8090 user@192.168.1.200-->
+<!--            ssh -N -o ExitOnForwardFailure=yes -L 8090:127.0.0.1:8090 user@192.168.100.46-->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>

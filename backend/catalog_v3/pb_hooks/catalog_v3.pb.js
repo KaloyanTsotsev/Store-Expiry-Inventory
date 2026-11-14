@@ -6,3 +6,7 @@ onRecordUpdateRequest(e=>require(__hooks+'/lib/catalog_v3.js').protectRole(e,fal
 onRecordCreateRequest(e=>require(__hooks+'/lib/catalog_v3.js').protectRole(e,true),'employees');
 
 routerAdd('POST','/api/store/catalog/deliveries/{id}/finalize',e=>require(__hooks+'/lib/catalog_v3.js').finalizeDelivery(e),$apis.requireAuth('employees'),$apis.bodyLimit(4194304));
+
+routerAdd('POST','/api/store/catalog/deliveries/{id}/finalize-article',e=>require(__hooks+'/lib/catalog_v3.js').finalizeDelivery(e,true),$apis.requireAuth('employees'),$apis.bodyLimit(4194304));
+
+routerAdd('POST','/api/store/catalog/products/delete',e=>require(__hooks+'/lib/catalog_v3.js').removeProduct(e),$apis.requireAuth('employees'),$apis.bodyLimit(4096));

@@ -39,6 +39,10 @@ void main() {
         final product = (await PocketBaseService.getProducts()).singleWhere(
           (p) => p.id == id,
         );
+        await PocketBaseService.login(
+          'catalogadmin',
+          'synthetic-test-only-40.4!',
+        );
         final saved = await catalog.confirmMatch(
           product: product,
           alias: 'СКД МЛЯКО',
@@ -46,6 +50,7 @@ void main() {
           code: '0001',
         );
         expect(saved['product']['id'], id);
+        await PocketBaseService.login('manager', 'synthetic-test-only-40.4!');
         final all = await PocketBaseService.getProducts();
         final item = DraftItem(
           name: 'СКД МЛЯКО',

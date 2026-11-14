@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:pocketbase/pocketbase.dart';
 
 import '../models/delivery_draft.dart';
+import '../widgets/expiry_date_field.dart';
 import '../services/ocr_service.dart';
 import '../services/product_matcher.dart';
 import '../services/product_catalog_service.dart';
@@ -98,6 +99,13 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
             }.values;
             final filtered = ranked
                 .where(
+                  (p) =>
+                      !widget.item.articleBarcode ||
+                      p.getStringValue('barcode').trim().isEmpty ||
+                      p.getStringValue('barcode').trim() ==
+                          fields['supplierCode']!.text.trim(),
+                )
+                .where(
                   (p) => '${p.data['name']} ${p.data['barcode']}'
                       .toLowerCase()
                       .contains(query),
@@ -180,9 +188,12 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
       ...widget.item.toJson(),
       for (final entry in fields.entries) entry.key: entry.value.text.trim(),
       'productId': productId,
+      'productSelectionConfirmed': selectionConfirmed,
       'proposedNewProduct': proposedNewProduct,
     });
-    if (candidate.requiresCatalogIdentity && candidate.catalogRequest == null) {
+    if (candidate.articleBarcode ||
+        (candidate.requiresCatalogIdentity &&
+            candidate.catalogRequest == null)) {
       ProductMatcher.prepare(candidate, products, widget.supplier);
     }
     if (checked &&
@@ -199,6 +210,7 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
     if (checked &&
         candidate.requiresCatalogIdentity &&
         !candidate.catalogOnFinalize &&
+        !candidate.articleBarcode &&
         parseQuantity(candidate.received) != 0) {
       final physical = DraftItem.fromJson({
         ...candidate.toJson(),
@@ -294,7 +306,9 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
     if (checked &&
         parseQuantity(candidate.received) != 0 &&
         !candidate.proposedNewProduct &&
-        !products.any((p) => p.id == productId && ProductMatcher.active(p))) {
+        !products.any(
+          (p) => p.id == candidate.productId && ProductMatcher.active(p),
+        )) {
       setState(
         () => error = 'Продуктът не е в заредения каталог. Обновете и го изберете отново.',
       );
@@ -329,6 +343,8 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
       await widget.onSave();
       final selected = products.where((p) => p.id == productId).firstOrNull;
       final alias = item.original['name'] ?? item.name;
+      final catalog = ProductCatalogService();
+      final mayLinkSupplier = catalog.isAdmin && widget.supplier.isNotEmpty;
       if (checked &&
           !item.requiresCatalogIdentity &&
           rememberMatch &&
@@ -337,14 +353,14 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                   ProductMatcher.nameKey(
                     selected.data['name']?.toString() ?? '',
                   ) ||
-              widget.supplier.isNotEmpty && item.supplierCode.isNotEmpty)) {
+              mayLinkSupplier && item.supplierCode.isNotEmpty)) {
         try {
-          final response = await ProductCatalogService()
+          final response = await catalog
               .confirmMatch(
                 product: selected,
                 alias: alias,
                 supplier: widget.supplier,
-                code: widget.supplier.isEmpty ? '' : item.supplierCode,
+                code: mayLinkSupplier ? item.supplierCode : '',
               )
               .timeout(const Duration(seconds: 8));
           if (mounted && response['status'] == 'pending') {
@@ -428,13 +444,17 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                   selected?.data['name']?.toString() ??
                       (proposedNewProduct
                           ? 'Нов продукт • ${fields['name']!.text}'
+                          : widget.item.articleBarcode
+                          ? 'Провери артикула'
                           : widget.item.requiresCatalogIdentity
                           ? 'Уточнете доставчика и кода на тази позиция'
                           : 'Изберете продукт от каталога'),
                 ),
                 subtitle: Text(
                   selected == null
-                      ? 'Няма автоматично съпоставяне по код на доставчик.'
+                      ? (widget.item.articleBarcode
+                            ? 'Съществуващ продукт се намира по точния код.'
+                            : 'Няма автоматично съпоставяне по код на доставчик.')
                       : 'ID: ${selected.id} • Баркод: ${selected.data['barcode'] ?? ''}',
                 ),
                 trailing: Icon(
@@ -442,7 +462,10 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                       ? Icons.inventory_2_outlined
                       : Icons.search,
                 ),
-                onTap: saving || widget.item.requiresCatalogIdentity
+                onTap:
+                    saving ||
+                        widget.item.requiresCatalogIdentity ||
+                        widget.item.articleBarcode
                     ? null
                     : _chooseProduct,
               ),
@@ -452,16 +475,20 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Text(
                   selectionConfirmed
-                      ? 'Ръчно избран продукт'
+                      ? (widget.item.articleBarcode
+                            ? 'Намерен по код'
+                            : 'Ръчно избран продукт')
                       : widget.item.matchReason,
                 ),
               ),
-            if (productId != null)
+            if (productId != null &&
+                !widget.item.requiresCatalogIdentity &&
+                !widget.item.articleBarcode)
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Запомни това съвпадение'),
                 subtitle: const Text(
-                  'Алиасът и кодът са по доставчик. За служители се изпраща предложение за одобрение.',
+                  'Алтернативното име може да се предложи за одобрение. Кодове по доставчик променя само администратор.',
                 ),
                 value: rememberMatch,
                 onChanged: saving
@@ -478,6 +505,8 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                           products = updated;
                           final candidate = DraftItem.fromJson({
                             ...widget.item.toJson(),
+                            'productId': productId,
+                            'productSelectionConfirmed': selectionConfirmed,
                             for (final e in fields.entries) e.key: e.value.text,
                           });
                           ProductMatcher.prepare(
@@ -486,6 +515,8 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                             widget.supplier,
                           );
                           productId = candidate.productId;
+                          selectionConfirmed =
+                              candidate.productSelectionConfirmed;
                           proposedNewProduct = candidate.proposedNewProduct;
                           if (productId != null) {
                             fields['name']!.text = candidate.name;
@@ -499,15 +530,18 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
             if (widget.catalogAccess != null &&
                 !widget.catalogAccess!.available)
               Text(widget.catalogAccess!.message),
-            if (widget.item.requiresCatalogIdentity &&
+            if ((widget.item.requiresCatalogIdentity ||
+                    widget.item.articleBarcode) &&
                 proposedNewProduct &&
-                widget.item.catalogOnFinalize)
+                (widget.item.catalogOnFinalize || widget.item.articleBarcode))
               const Text(
                 'Нов продукт — ще бъде създаден при общото потвърждение на доставката. Тук не се записват продукти или наличности.',
               ),
-            if (widget.item.requiresCatalogIdentity &&
+            if ((widget.item.requiresCatalogIdentity ||
+                    widget.item.articleBarcode) &&
                 proposedNewProduct &&
-                !widget.item.catalogOnFinalize)
+                !widget.item.catalogOnFinalize &&
+                !widget.item.articleBarcode)
               Text(
                 (widget.identityService?.catalog ?? ProductCatalogService())
                         .canManage
@@ -526,73 +560,109 @@ class _DeliveryItemScreenState extends State<DeliveryItemScreen> {
                     : (value) =>
                           setState(() => proposedNewProduct = value == true),
               ),
-            for (final entry in fields.entries.where((e) => e.key != 'barcode'))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: TextField(
-                  controller: entry.value,
-                  onChanged: (_) {
-                    if (entry.key == 'lot' || entry.key == 'received') {
-                      setState(() {});
-                    }
-                    if (widget.item.requiresCatalogIdentity &&
-                        [
-                          'name',
-                          'supplierCode',
-                          'barcode',
-                        ].contains(entry.key)) {
-                      final candidate = DraftItem.fromJson({
-                        ...widget.item.toJson(),
-                        for (final e in fields.entries) e.key: e.value.text,
-                      });
-                      ProductMatcher.prepare(
-                        candidate,
-                        products,
-                        widget.supplier,
-                      );
-                      setState(() {
-                        productId = candidate.productId;
-                        proposedNewProduct = candidate.proposedNewProduct;
-                      });
-                      return;
-                    }
-                    if ((entry.key == 'name' ||
-                            entry.key == 'supplierCode' ||
-                            entry.key == 'barcode') &&
-                        !selectionConfirmed) {
-                      setState(() {
-                        productId = null;
-                        proposedNewProduct = false;
-                      });
-                    }
-                  },
-                  enabled: !saving && widget.item.catalogRequest == null,
-                  keyboardType: ['received', 'ordered'].contains(entry.key)
-                      ? const TextInputType.numberWithOptions(decimal: true)
-                      : TextInputType.text,
-                  decoration: InputDecoration(
-                    labelText: labels[entry.key],
-                    helperText: entry.key == 'received'
-                        ? 'Въведете преброеното; 0 означава неполучена позиция.'
-                        : entry.key == 'lot'
-                        ? 'Незадължително; празно или 1 се записва като N/A.'
-                        : widget.item.uncertainFields.contains(entry.key)
-                        ? 'Несигурен OCR резултат — проверете полето.'
-                        : widget.item.original.containsKey(entry.key) &&
-                              entry.value.text ==
-                                  widget.item.original[entry.key]
-                        ? 'Автоматично разпознато — проверете с документа.'
-                        : 'Ръчно въведена или коригирана стойност.',
-                    helperMaxLines: 3,
-                    suffixIcon:
-                        widget.item.uncertainFields.contains(entry.key) &&
-                            (entry.key != 'lot' ||
-                                normalizeLotNumber(entry.value.text) != 'N/A')
-                        ? const Icon(Icons.help_outline)
-                        : null,
+            for (final entry in fields.entries.where(
+              (e) =>
+                  e.key != 'barcode' &&
+                  (!widget.item.articleBarcode ||
+                      !['ordered', 'unit'].contains(e.key)),
+            ))
+              if (entry.key == 'expiry')
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: ExpiryDateField(
+                    controller: entry.value,
+                    enabled:
+                        !saving &&
+                        (widget.item.articleBarcode ||
+                            widget.item.catalogRequest == null),
+                  ),
+                )
+              else
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: TextField(
+                    controller: entry.value,
+                    onChanged: (_) {
+                      if (entry.key == 'lot' || entry.key == 'received') {
+                        setState(() {});
+                      }
+                      if ((widget.item.requiresCatalogIdentity ||
+                              widget.item.articleBarcode) &&
+                          [
+                            'name',
+                            'supplierCode',
+                            'barcode',
+                          ].contains(entry.key)) {
+                        final candidate = DraftItem.fromJson({
+                          ...widget.item.toJson(),
+                          'productId': entry.key == 'supplierCode'
+                              ? null
+                              : productId,
+                          'productSelectionConfirmed':
+                              entry.key != 'supplierCode' && selectionConfirmed,
+                          for (final e in fields.entries) e.key: e.value.text,
+                        });
+                        ProductMatcher.prepare(
+                          candidate,
+                          products,
+                          widget.supplier,
+                        );
+                        setState(() {
+                          productId = candidate.productId;
+                          selectionConfirmed =
+                              candidate.productSelectionConfirmed;
+                          proposedNewProduct = candidate.proposedNewProduct;
+                        });
+                        return;
+                      }
+                      if ((entry.key == 'name' ||
+                              entry.key == 'supplierCode' ||
+                              entry.key == 'barcode') &&
+                          !selectionConfirmed) {
+                        setState(() {
+                          productId = null;
+                          proposedNewProduct = false;
+                        });
+                      }
+                    },
+                    enabled:
+                        !saving &&
+                        (widget.item.articleBarcode ||
+                            widget.item.catalogRequest == null),
+                    readOnly:
+                        widget.item.articleBarcode &&
+                        productId != null &&
+                        (entry.key == 'name' || entry.key == 'ordered'),
+                    keyboardType: ['received', 'ordered'].contains(entry.key)
+                        ? const TextInputType.numberWithOptions(decimal: true)
+                        : TextInputType.text,
+                    decoration: InputDecoration(
+                      labelText:
+                          widget.item.articleBarcode &&
+                              entry.key == 'supplierCode'
+                          ? 'Артикул'
+                          : labels[entry.key],
+                      helperText: entry.key == 'received'
+                          ? 'Въведете преброеното; 0 означава неполучена позиция.'
+                          : entry.key == 'lot'
+                          ? 'Незадължително; празно или 1 се записва като N/A.'
+                          : widget.item.uncertainFields.contains(entry.key)
+                          ? 'Несигурен OCR резултат — проверете полето.'
+                          : widget.item.original.containsKey(entry.key) &&
+                                entry.value.text ==
+                                    widget.item.original[entry.key]
+                          ? 'Автоматично разпознато — проверете с документа.'
+                          : 'Ръчно въведена или коригирана стойност.',
+                      helperMaxLines: 3,
+                      suffixIcon:
+                          widget.item.uncertainFields.contains(entry.key) &&
+                              (entry.key != 'lot' ||
+                                  normalizeLotNumber(entry.value.text) != 'N/A')
+                          ? const Icon(Icons.help_outline)
+                          : null,
+                    ),
                   ),
                 ),
-              ),
             if (widget.item.original.isNotEmpty)
               ExpansionTile(
                 title: const Text('Първоначален OCR резултат'),

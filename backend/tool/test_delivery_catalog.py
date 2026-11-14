@@ -44,15 +44,16 @@ def execute_delivery_catalog_tests(api, admin, owner, work):
     assert counts()['products']==before['products'] and counts()['batches']==before['batches']
     before=counts()
     p=packet(d,b); missing=copy.deepcopy(p); missing['catalog_confirmed']=False
-    ok(finish(d,missing),400); assert counts()==before
+    # Per-row staged checked evidence is the confirmation; legacy UI flags are optional.
+    assert missing['catalog_confirmed'] is False
     receipt=ok(finish(d,p)); after=counts()
     assert after['products']==before['products']+37 and after['batches']==before['batches']+37
     assert after['stock_movements']==before['stock_movements']+37
     assert after['product_catalog_audit']==before['product_catalog_audit']+37
     assert len(receipt['lines'])==37
     created=[r for r in records('products') if r['name'].startswith('Bulk ROW')]
-    assert len(created)==37 and all(r['barcode']=='' for r in created)
-    assert all(r['supplier_identifiers'][0]['verified'] is True for r in created)
+    assert len(created)==37 and all(r['barcode']==r['name'].removeprefix('Bulk ') for r in created)
+    assert all(not r.get('supplier_identifiers') for r in created)
     assert ok(finish(d,p))==receipt and counts()==after
     changed=copy.deepcopy(p);changed['lines'][0]['name']='Changed'
     ok(finish(d,changed),409); assert counts()==after
@@ -83,7 +84,7 @@ def execute_delivery_catalog_tests(api, admin, owner, work):
     assert current['status']=='draft' and current['revision']==d['revision']
     passed('real receipt fault rolls back products, associations, audits, staged IDs, stock and operation journals')
     # Reject invented product identity instead of guessing by name.
-    b=body('bulkconflict', ('NEWCODE',));b['lines'][0]['name']='Bulk ROW0'
+    b=body('bulkconflict', ('ROW0',));b['lines'][0].update(product_id='prd000000000001',proposed_new=False)
     d=stage(b);before=counts();ok(finish(d,packet(d,b)),409);assert counts()==before
     b=body('bulkinvalid', ('INVALID',));b['lines'][0]['expiry_date']=''
     ok(api('POST','/api/store/drafts/stage',b,owner),400)
@@ -111,6 +112,48 @@ def execute_delivery_catalog_tests(api, admin, owner, work):
     assert replies[0][1]['lines'][0]['product_id']==replies[1][1]['lines'][0]['product_id']
     assert sum(p['name']=='Bulk RACECODE' for p in records('products'))==1
     passed('two callers cannot double-finalize; concurrent independent deliveries reuse one catalog identity')
+    def finish_article(d,b,token=owner):
+        return api('POST','/api/store/catalog/deliveries/'+d['delivery_id']+'/finalize-article',
+                   {**packet(d,b),'article_barcode_confirmed':True},token)
+    assert ok(api('GET','/api/store/catalog/capabilities',token=owner))['delivery_article_barcode'] is True
+    first=body('articleLeading',('0000123',));first['supplier']=''
+    d=stage(first);original=ok(finish_article(d,first));assert ok(finish_article(d,first))==original
+    delivery=next(d for d in records('deliveries') if d['id']==original['delivery_id'])
+    assert all(not delivery[k] for k in ['supplier','document_number','document_date'])
+    pid=original['lines'][0]['product_id']
+    stored=next(p for p in records('products') if p['id']==pid)
+    assert stored['barcode']=='0000123'
+    second=body('articleRepeat',('0000123',),expiry='2026-12-01')
+    second.update(document_number='DOC-0007',document_date='2026-11-11')
+    second['lines'][0]['name']='OCR name must not replace the catalog'
+    d=stage(second);assert ok(finish_article(d,second))['lines'][0]['product_id']==pid
+    metadata=next(x for x in records('deliveries') if x['id']==d['delivery_id'])
+    assert metadata['supplier']==second['supplier'] and metadata['document_number']=='DOC-0007' and metadata['document_date'][:10]=='2026-11-11'
+    assert next(p for p in records('products') if p['id']==pid)==stored
+    product_batches=[r for r in records('batches') if r['product']==pid]
+    assert {r['expiry_date'][:10] for r in product_batches}=={'2026-11-08','2026-12-01'}
+    passed('article barcode keeps leading zeroes; separate batches reuse exact product without renaming')
+    legacy=next(p for p in records('products') if p['name']=='Bulk ROLE0')
+    # Test explicit confirmed assignment only for a genuinely empty old code.
+    ok(api('PATCH','/api/collections/products/records/'+legacy['id'],{'barcode':''},admin))
+    link=body('articleBackfill',('000099',));link['lines'][0].update(product_id=legacy['id'],proposed_new=False)
+    d=stage(link);ok(finish_article(d,link))
+    after_link=next(p for p in records('products') if p['id']==legacy['id'])
+    assert after_link['barcode']=='000099' and after_link['name']==legacy['name']
+    assert after_link['supplier_identifiers']==legacy['supplier_identifiers']
+    assert any(a['product']==legacy['id'] and a['after'].get('barcode')=='000099' for a in records('product_catalog_audit'))
+    conflict=body('articleConflict',('000055',));conflict['lines'][0].update(product_id=legacy['id'],proposed_new=False)
+    d=stage(conflict);before=counts()
+    assert ok(finish_article(d,conflict),409)['code']=='conflicting_article_barcode'
+    assert counts()==before and next(p for p in records('products') if p['id']==legacy['id'])==after_link
+    passed('confirmed backfill keeps product ID and supplier links; conflicting barcode cannot be overwritten')
+    bad=body('articleBadName',('BADARTICLE',));bad['lines'][0]['name']=''
+    before=counts();ok(api('POST','/api/store/drafts/stage',bad,owner),400)
+    assert counts()==before
+    duplicate=body('articleDuplicate',('0000123',));duplicate['lines'][0].update(product_id=legacy['id'],proposed_new=False)
+    d=stage(duplicate);before=counts();ok(finish_article(d,duplicate),409)
+    assert counts()==before
+    passed('empty names and conflicting explicit product identities cannot create inventory')
     report={'runtime':'0.40.4','count':len(results),'passed':results,'production_contacted':False,'workspace':str(work)}
     target=pathlib.Path(__file__).resolve().parents[2]/'build/backend-v3/delivery-catalog-report.json'
     target.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

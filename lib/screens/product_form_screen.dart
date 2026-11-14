@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:pocketbase/pocketbase.dart';
 
 import '../models/delivery_draft.dart';
-import '../services/gtin.dart';
 import '../services/product_catalog_service.dart';
 import '../services/product_matcher.dart';
 import '../theme/app_spacing.dart';
@@ -27,17 +26,20 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   final formKey = GlobalKey<FormState>();
   final nameController = TextEditingController(),
       barcodeController = TextEditingController(),
-      categoryController = TextEditingController(),
-      aliasController = TextEditingController(),
-      codesController = TextEditingController();
+      categoryController = TextEditingController();
   late final catalog = widget.catalog ?? ProductCatalogService();
-  bool isSaving = false, active = true;
+  bool isSaving = false, isDeleting = false;
   String? errorMessage, suggestionId;
-  Map<String, dynamic>? pendingRequest;
+  Map<String, dynamic>? pendingRequest, pendingDelete;
   List<RecordModel> corrections = [];
   List<RecordModel> history = [];
   bool get _canManage => widget.catalogAccess?.canCreate ?? catalog.canManage;
-  bool get locked => isSaving || pendingRequest != null;
+  bool get _canDelete =>
+      _canManage &&
+      widget.product != null &&
+      widget.catalogAccess?.canDeleteProduct == true;
+  bool get locked =>
+      isSaving || isDeleting || pendingRequest != null || pendingDelete != null;
   @override
   void initState() {
     super.initState();
@@ -49,12 +51,6 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
     nameController.text = data['name']?.toString() ?? '';
     barcodeController.text = data['barcode']?.toString() ?? '';
     categoryController.text = data['category']?.toString() ?? '';
-    aliasController.text = (data['aliases'] as List? ?? []).join('\n');
-    codesController.text = (data['supplier_identifiers'] as List? ?? [])
-        .whereType<Map>()
-        .map((m) => '${m['supplier']} | ${m['code']}')
-        .join('\n');
-    active = data['active'] != false;
   }
 
   Future<void> _loadCorrections() async {
@@ -71,26 +67,10 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
     }
   }
 
-  List<Map<String, dynamic>> _codes() => [
-    for (final line
-        in codesController.text.split('\n').where((s) => s.trim().isNotEmpty))
-      {
-        'supplier': line.split('|').first.trim(),
-        'code': line.contains('|')
-            ? line.substring(line.indexOf('|') + 1).trim()
-            : '',
-      },
-  ];
   String _describe(Map<String, dynamic> values) => [
     if (values.containsKey('name')) 'Име: ${values['name']}',
-    if (values.containsKey('barcode')) 'Баркод: ${values['barcode']}',
+    if (values.containsKey('barcode')) 'Код: ${values['barcode']}',
     if (values.containsKey('category')) 'Категория: ${values['category']}',
-    if (values.containsKey('active'))
-      'Статус: ${values['active'] == true ? 'Активен' : 'Неактивен'}',
-    if (values['aliases'] is List)
-      'Алиаси: ${(values['aliases'] as List).join(', ')}',
-    if (values['supplier_identifiers'] is List)
-      'Кодове: ${(values['supplier_identifiers'] as List).whereType<Map>().map((m) => '${m['supplier']} → ${m['code']}').join(', ')}',
   ].join('\n');
   String _historyLabel(RecordModel change) {
     final actor = change.get<List<RecordModel>>('expand.actor', []).firstOrNull;
@@ -105,7 +85,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   }
 
   Future<void> saveProduct() async {
-    if (isSaving) return;
+    if (isSaving || isDeleting || pendingDelete != null) return;
     if (widget.catalogAccess != null && !widget.catalogAccess!.available) {
       setState(() => errorMessage = widget.catalogAccess!.message);
       return;
@@ -123,9 +103,9 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
             p.id != widget.product?.id &&
             (ProductMatcher.nameKey(p.data['name']?.toString() ?? '') ==
                     ProductMatcher.nameKey(nameController.text) ||
-                (gtinKey(barcodeController.text) != null &&
-                    gtinKey(p.data['barcode']?.toString() ?? '') ==
-                        gtinKey(barcodeController.text))),
+                (barcodeController.text.trim().isNotEmpty &&
+                    p.getStringValue('barcode').trim() ==
+                        barcodeController.text.trim())),
       );
       if (duplicate.isNotEmpty) {
         setState(
@@ -136,6 +116,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
       }
       pendingRequest = {
         'operation_key': 'catalog:${newDraftId()}',
+        'form_version': 2,
         'product_id': widget.product?.id ?? '',
         'expected_revision': widget.product?.data['catalog_revision'] ?? 0,
         if (suggestionId != null) 'suggestion_id': suggestionId,
@@ -143,14 +124,6 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
           'name': nameController.text.trim(),
           'barcode': barcodeController.text.trim(),
           'category': categoryController.text.trim(),
-          'active': active,
-          'aliases': aliasController.text
-              .split('\n')
-              .map((a) => a.trim())
-              .where((a) => a.isNotEmpty)
-              .toSet()
-              .toList(),
-          'supplier_identifiers': _codes(),
         },
       };
     }
@@ -188,15 +161,69 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
     }
   }
 
+  Future<void> _deleteProduct() async {
+    if (!_canDelete || isSaving || isDeleting || pendingRequest != null) return;
+    final product = widget.product!;
+    if (pendingDelete == null) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Изтрий продукт?'),
+          content: Text(
+            '${product.getStringValue('name')}\n\nПродуктът ще бъде изтрит само ако няма свързани записи или история.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Отказ'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Изтрий'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted || isDeleting) return;
+      pendingDelete = {
+        'operation_key': 'catalog:delete:${newDraftId()}',
+        'product_id': product.id,
+        'expected_revision': product.data['catalog_revision'] ?? 0,
+      };
+    }
+    setState(() {
+      isDeleting = true;
+      errorMessage = null;
+    });
+    try {
+      final receipt = await catalog.deleteProduct(pendingDelete!);
+      if (receipt['status'] != 'deleted' ||
+          receipt['product_id'] != product.id) {
+        throw const FormatException(
+          'Няма потвърждение за изтриването. Повторете същата заявка.',
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Продуктът е изтрит.')));
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (e is ClientException &&
+          [400, 401, 403, 404, 409, 501, 503].contains(e.statusCode) &&
+          e.response['code'] != 'catalog_transaction_not_confirmed') {
+        pendingDelete = null;
+      }
+      if (mounted) {
+        setState(() => errorMessage = ProductCatalogService.message(e));
+      }
+    } finally {
+      if (mounted) setState(() => isDeleting = false);
+    }
+  }
+
   @override
   void dispose() {
-    for (final c in [
-      nameController,
-      barcodeController,
-      categoryController,
-      aliasController,
-      codesController,
-    ]) {
+    for (final c in [nameController, barcodeController, categoryController]) {
       c.dispose();
     }
     super.dispose();
@@ -206,7 +233,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   Widget build(BuildContext context) {
     final manager = _canManage;
     return PopScope(
-      canPop: !isSaving,
+      canPop: !isSaving && !isDeleting,
       child: Scaffold(
         appBar: AppBar(
           title: Text(
@@ -224,34 +251,12 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (widget.product != null)
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(AppSpacing.large),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Продукт ${widget.product!.id}',
-                            style: Theme.of(context).textTheme.labelLarge,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            manager
-                                ? 'Редакцията запазва същия ID и историята на доставките.'
-                                : 'Корекцията е предложение. Управител проверява и одобрява промяната.',
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: AppSpacing.large),
                 TextFormField(
                   controller: nameController,
                   enabled: !locked,
                   maxLines: null,
                   decoration: const InputDecoration(
-                    labelText: 'Име на продукта *',
+                    labelText: 'Име на продукт',
                     prefixIcon: Icon(Icons.inventory_2_outlined),
                   ),
                   validator: (v) => v == null || v.trim().isEmpty
@@ -262,61 +267,24 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                 TextFormField(
                   controller: barcodeController,
                   enabled: !locked,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Баркод EAN/GTIN',
-                    helperText: 'Незадължителен; само реален код с валидна контролна цифра.',
-                    helperMaxLines: 3,
-                  ),
-                  validator: (v) =>
-                      (v ?? '').trim().isNotEmpty && gtinKey(v!) == null
-                      ? 'Невалиден GTIN-8/12/13/14'
-                      : null,
+                  decoration: const InputDecoration(labelText: 'Код'),
+                  validator: (v) {
+                    final code = v?.trim() ?? '';
+                    if (code.isEmpty ||
+                        code ==
+                            widget.product?.getStringValue('barcode').trim()) {
+                      return null;
+                    }
+                    return validArticleCode(code)
+                        ? null
+                        : 'Въведете валиден артикулен код.';
+                  },
                 ),
                 const SizedBox(height: AppSpacing.large),
                 TextFormField(
                   controller: categoryController,
                   enabled: !locked,
                   decoration: const InputDecoration(labelText: 'Категория'),
-                ),
-                const SizedBox(height: AppSpacing.large),
-                TextFormField(
-                  controller: aliasController,
-                  enabled: !locked,
-                  minLines: 2,
-                  maxLines: 6,
-                  decoration: const InputDecoration(
-                    labelText: 'Алтернативни имена',
-                    helperText: 'По един потвърден алиас на ред. Оригиналният OCR не се променя.',
-                    helperMaxLines: 3,
-                  ),
-                ),
-                const SizedBox(height: AppSpacing.large),
-                TextFormField(
-                  controller: codesController,
-                  enabled: !locked,
-                  minLines: 2,
-                  maxLines: 6,
-                  decoration: const InputDecoration(
-                    labelText: 'Кодове по доставчик',
-                    helperText: 'Всеки ред: Доставчик | Артикулен код. Водещите нули се запазват.',
-                    helperMaxLines: 3,
-                  ),
-                  validator: (_) =>
-                      _codes().any(
-                        (m) => m['supplier'].isEmpty || m['code'].isEmpty,
-                      )
-                      ? 'Всеки код изисква доставчик и разделител |'
-                      : null,
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Активен продукт'),
-                  subtitle: const Text(
-                    'Неактивните продукти остават в историята.',
-                  ),
-                  value: active,
-                  onChanged: locked ? null : (v) => setState(() => active = v),
                 ),
                 if (corrections.isNotEmpty)
                   ExpansionTile(
@@ -404,6 +372,8 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                 FilledButton.icon(
                   onPressed:
                       isSaving ||
+                          isDeleting ||
+                          pendingDelete != null ||
                           (widget.catalogAccess != null &&
                               !widget.catalogAccess!.available)
                       ? null
@@ -425,6 +395,23 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                         : 'Изпрати предложение',
                   ),
                 ),
+                if (_canDelete)
+                  TextButton.icon(
+                    onPressed: isSaving || isDeleting || pendingRequest != null
+                        ? null
+                        : _deleteProduct,
+                    style: TextButton.styleFrom(
+                      foregroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                    icon: const Icon(Icons.delete_outline),
+                    label: Text(
+                      isDeleting
+                          ? 'Проверка…'
+                          : pendingDelete != null
+                          ? 'Повтори заявката за изтриване'
+                          : 'Изтрий продукт',
+                    ),
+                  ),
                 const SizedBox(height: AppSpacing.section),
               ],
             ),

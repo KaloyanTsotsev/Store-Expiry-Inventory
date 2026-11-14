@@ -1,4 +1,6 @@
 import java.util.Base64
+import java.util.Properties
+import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
@@ -8,7 +10,16 @@ plugins {
 
 val ocrTestApp = (project.findProperty("dart-defines") as? String)
     ?.split(",")?.any { String(Base64.getDecoder().decode(it)) == "OCR_TEST_APP=true" } == true
+val signingProperties = Properties()
+val signingPropertiesFile = file(
+    "${System.getProperty("user.home")}/StoreFlow-Signing/key.properties"
+)
 
+if (signingPropertiesFile.isFile) {
+    FileInputStream(signingPropertiesFile).use {
+        signingProperties.load(it)
+    }
+}
 android {
     namespace = "com.expiry_tracker.expiry_tracker"
     compileSdk = flutter.compileSdkVersion
@@ -35,12 +46,21 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
-
+    signingConfigs {
+        if (signingPropertiesFile.isFile) {
+            create("storeflowRelease") {
+                storeFile = file(signingProperties.getProperty("storeFile"))
+                storePassword = signingProperties.getProperty("storePassword")
+                keyAlias = signingProperties.getProperty("keyAlias")
+                keyPassword = signingProperties.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            if (signingPropertiesFile.isFile) {
+                signingConfig = signingConfigs.getByName("storeflowRelease")
+            }
         }
     }
 }

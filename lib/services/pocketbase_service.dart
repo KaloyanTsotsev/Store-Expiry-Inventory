@@ -6,7 +6,12 @@ import 'package:pocketbase/pocketbase.dart';
 import '../models/expiry_batch.dart';
 
 class PocketBaseService {
-  static final pb = PocketBase('http://192.168.1.200:8090');
+  static final pb = PocketBase(
+    const String.fromEnvironment(
+      'POCKETBASE_URL',
+      defaultValue: 'http://192.168.100.46:8090',
+    ),
+  );
 
   static Future<void> login(String username, String password) async {
     await pb.collection('employees').authWithPassword(username, password);
@@ -33,15 +38,96 @@ class PocketBaseService {
     return records;
   }
 
-  static Future<List<ExpiryBatch>> getExpiryBatches({DateTime? now}) async {
+  static Future<RecordModel?> findProductByBarcode(String barcode) async {
+    _requireEmployee();
+    final code = barcode.trim();
+    if (code.isEmpty) throw ArgumentError('Въведете баркод.');
+    final matches = await pb
+        .collection('products')
+        .getList(
+          perPage: 2,
+          filter: pb.filter('barcode = {:barcode}', {'barcode': code}),
+        );
+    if (matches.items.length > 1) {
+      throw StateError('Баркодът е свързан с повече от един продукт.');
+    }
+    return matches.items.firstOrNull;
+  }
+
+  static Future<void> discardDeliveryDraft(
+    String owner,
+    String clientId,
+  ) async {
+    _requireEmployee();
+    if (pb.authStore.record?.id != owner) {
+      throw StateError('Черновата е на друг служител.');
+    }
+    final receipt = await pb
+        .send<Map<String, dynamic>>(
+          '/api/store/drafts/discard',
+          method: 'POST',
+          body: {'client_id': clientId},
+        )
+        .timeout(const Duration(seconds: 15));
+    if (receipt['status'] != 'discarded' || receipt['client_id'] != clientId) {
+      throw const FormatException(
+        'Сървърът не потвърди изтриването на черновата.',
+      );
+    }
+  }
+
+  static Future<void> sendExpiryHandling(
+    String owner,
+    Map<String, dynamic> command,
+  ) async {
+    _requireEmployee();
+    if (pb.authStore.record?.id != owner ||
+        command['employee'] != owner ||
+        command['kind'] != 'delete_batch') {
+      throw StateError('Заявката не е за текущия служител.');
+    }
+    final id = command['batch'] as String;
+    final capabilities = await pb
+        .send<Map<String, dynamic>>('/api/store/capabilities')
+        .timeout(const Duration(seconds: 10));
+    if (capabilities['batch_deletion'] != true) {
+      throw StateError(
+        'Сървърът все още приключва партидите вместо да ги изтрива. Необходим е пакетът за окончателно изтриване; заявката не е изпратена.',
+      );
+    }
+    final receipt = await pb
+        .send<Map<String, dynamic>>(
+          '/api/store/batches/${Uri.encodeComponent(id)}/handle',
+          method: 'POST',
+          body: {
+            'action': 'delete_batch',
+            'expected_revision': command['expected_revision'],
+            'expiry_date': command['expiry_date'],
+          },
+        )
+        .timeout(const Duration(seconds: 15));
+    if (receipt['batch_id'] != id ||
+        receipt['status'] != 'deleted' ||
+        receipt['deleted'] != true) {
+      throw const FormatException(
+        'PocketBase не потвърди окончателното изтриване.',
+      );
+    }
+  }
+
+  static Future<List<ExpiryBatch>> getExpiryBatches({
+    DateTime? now,
+    bool includeClosed = false,
+  }) async {
     _requireEmployee();
     final records = await pb
         .collection('batches')
-        .getFullList(expand: 'product');
+        .getFullList(expand: 'product')
+        .timeout(const Duration(seconds: 15));
     final date = now ?? DateTime.now();
     final batches = records
         .map((r) => ExpiryBatch.fromRecord(r, now: date))
-        .where((b) => !b.closed)
+        .where((b) => includeClosed || !b.closed)
         .toList();
     batches.sort((a, b) {
       final comparison = (a.days ?? 0x7fffffff).compareTo(b.days ?? 0x7fffffff);
@@ -63,7 +149,6 @@ class PocketBaseService {
             'name': name.trim(),
             'barcode': barcode.trim(),
             'category': category.trim(),
-            'active': true,
           },
         );
   }

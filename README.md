@@ -11,15 +11,14 @@ The goal is to make it easier to track products, deliveries, batches, stock leve
 - **SQLite** — Data storage
 - **Linux** — Self-hosted local server
 
-## Planned Features
+## App Features
 
 - Product and barcode management
 - Delivery and batch tracking
 - Expiration date monitoring
 - Inventory and stock movements
-- Waste tracking
 - Employee authentication and roles
-- Future support for notifications and OCR
+- OCR
 
 ## Development Status
 

@@ -4,14 +4,73 @@ import 'package:flutter/foundation.dart';
 import 'package:pocketbase/pocketbase.dart';
 
 import '../models/expiry_batch.dart';
-
+import 'package:shared_preferences/shared_preferences.dart';
 class PocketBaseService {
-  static final pb = PocketBase(
-    const String.fromEnvironment(
-      'POCKETBASE_URL',
-      defaultValue: 'http://192.168.100.46:8090',
-    ),
+  static const String defaultServerUrl = String.fromEnvironment(
+    'POCKETBASE_URL',
+    defaultValue: 'http://192.168.100.46:8090',
   );
+
+  static PocketBase pb = PocketBase(defaultServerUrl);
+
+  static Future<void> initialize() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final savedUrl = prefs.getString('pocketbase_server_url');
+
+    final url = savedUrl ?? defaultServerUrl;
+
+    pb = PocketBase(url);
+  }
+
+  static Future<void> saveServerIp(String ipAddress) async {
+    final ip = ipAddress.trim();
+
+    final parts = ip.split('.');
+
+    if (parts.length != 4 ||
+        parts.any((part) {
+          final number = int.tryParse(part);
+          return part.isEmpty ||
+              number == null ||
+              number < 0 ||
+              number > 255 ||
+              number.toString() != part;
+        })) {
+      throw const FormatException('Въведете валиден IPv4 адрес.');
+    }
+
+    final newUrl = 'http://$ip:8090';
+
+    // Проверяваме новия сървър, преди да запазим адреса.
+    final testClient = PocketBase(newUrl);
+
+    final response = await testClient
+        .send<Map<String, dynamic>>('/api/health')
+        .timeout(const Duration(seconds: 8));
+
+    if (response['code'] != 200) {
+      throw StateError('Сървърът не потвърди успешна връзка.');
+    }
+
+    // Запазваме адреса само след успешна проверка.
+    final prefs = await SharedPreferences.getInstance();
+
+    final saved = await prefs.setString(
+      'pocketbase_server_url',
+      newUrl,
+    );
+
+    if (!saved) {
+      throw StateError('IP адресът не можа да бъде запазен.');
+    }
+
+    // При смяна на сървъра изчистваме старата сесия.
+    if (pb.baseURL != newUrl) {
+      pb.authStore.clear();
+      pb = PocketBase(newUrl);
+    }
+  }
 
   static Future<void> login(String username, String password) async {
     await pb.collection('employees').authWithPassword(username, password);

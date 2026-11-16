@@ -1,15 +1,25 @@
+
 import 'package:flutter/material.dart';
 
 import 'screens/login_screen.dart';
+import 'services/pocketbase_service.dart';
 import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
   try {
     await ThemeController.instance.load();
   } catch (error) {
     debugPrint('Theme preferences could not be loaded: $error');
   }
+
+  try {
+    await PocketBaseService.initialize();
+  } catch (error) {
+    debugPrint('PocketBase settings could not be loaded: $error');
+  }
+
   runApp(const MyApp());
 }
 

@@ -4,7 +4,7 @@ import '../services/pocketbase_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/storeflow_brand.dart';
 import 'home_screen.dart';
-
+import 'server_settings_screen.dart';
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -72,7 +72,24 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(actions: const [ThemeMenu()]),
+      appBar: AppBar(
+        actions: [
+          IconButton(
+            tooltip: 'Настройки на сървъра',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: isLoading
+                ? null
+                : () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const ServerSettingsScreen(),
+                ),
+              );
+            },
+          ),
+          const ThemeMenu(),
+        ],
+      ),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
